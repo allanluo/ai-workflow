@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  # SQLite runs locally, so no container needed
+  
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ai-workflow-ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    environment:
+      OLLAMA_NUM_GPU: 0  # Set to -1 to auto-detect GPU, 0 for CPU only
+    profiles:
+      - with-services
+
+  ffmpeg-service:
+    # This is a placeholder - ffmpeg typically runs locally
+    # For a real ffmpeg service, you'd need a custom image
+    # This container just documents the expected service
+    image: linuxserver/ffmpeg:latest
+    container_name: ai-workflow-ffmpeg
+    ports:
+      - "9000:9000"
+    environment:
+      PUID: 1000
+      PGID: 1000
+      TZ: UTC
+    profiles:
+      - with-services
+
+  # PostgreSQL for future multi-user deployment
+  postgres:
+    image: postgres:16-alpine
+    container_name: ai-workflow-postgres
+    environment:
+      POSTGRES_DB: ai_workflow
+      POSTGRES_USER: ai_workflow
+      POSTGRES_PASSWORD: dev_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    profiles:
+      - with-database
+
+volumes:
+  ollama_data:
+  postgres_data:
+
+# Usage:
+# 
+# Run with local services (Ollama + FFmpeg):
+#   docker-compose -f docker-compose.dev.yml --profile with-services up
+#
+# Run with PostgreSQL for testing migration:
+#   docker-compose -f docker-compose.dev.yml --profile with-database up
+#
+# Run both:
+#   docker-compose -f docker-compose.dev.yml --profile with-services --profile with-database up

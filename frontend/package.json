@@ -1,0 +1,52 @@
+{
+  "name": "@ai-workflow/frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "pnpm build:electron && vite build",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.electron.json",
+    "lint": "eslint \"src/**/*.{ts,tsx}\" \"electron/**/*.ts\"",
+    "test": "vitest run",
+    "dev:electron": "pnpm build:electron && electron .",
+    "package": "pnpm build && electron-forge package",
+    "make": "pnpm build && electron-forge make",
+    "start": "electron-forge start"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.59.16",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^7.0.2",
+    "zod": "^3.23.8",
+    "zustand": "^5.0.1"
+  },
+  "devDependencies": {
+    "@electron-forge/cli": "^7.6.0",
+    "@electron-forge/maker-deb": "^7.6.0",
+    "@electron-forge/maker-dmg": "^7.6.0",
+    "@electron-forge/maker-squirrel": "^7.6.0",
+    "@electron-forge/maker-zip": "^7.6.0",
+    "@electron-forge/plugin-auto-unpack-natives": "^7.6.0",
+    "@electron-forge/plugin-vite": "^7.6.0",
+    "@tailwindcss/postcss": "^4.2.2",
+    "@types/node": "^22.9.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.27",
+    "electron": "^33.2.0",
+    "eslint": "^9.14.0",
+    "postcss": "^8.5.9",
+    "tailwindcss": "^4.2.2",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10",
+    "vitest": "^2.1.4"
+  },
+  "config": {
+    "forge": "./forge.config.ts"
+  }
+}
