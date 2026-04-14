@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchProjectAssets, createAsset, type Asset } from '../lib/api';
-import { Button, Badge } from '../components/common';
+import { Button, Badge, Modal } from '../components/common';
 
 interface ScenesTabProps {
   projectId: string;
@@ -10,11 +10,13 @@ interface ScenesTabProps {
 export function ScenesTab({ projectId }: ScenesTabProps) {
   const queryClient = useQueryClient();
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
+  const [selectedAsset, setSelectedAsset] = useState<Asset | null>(null);
 
   const scenesQuery = useQuery({
     queryKey: ['project-assets', projectId, 'scene'],
-    queryFn: () => fetchProjectAssets(projectId, 'scene'),
+    queryFn: () => fetchProjectAssets(projectId),
     enabled: Boolean(projectId),
+    select: assets => assets.filter(a => a.asset_type === 'scene'),
   });
 
   const createMutation = useMutation({
@@ -83,13 +85,23 @@ export function ScenesTab({ projectId }: ScenesTabProps) {
         viewMode === 'grid' ? (
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
             {scenesQuery.data.map((asset, index) => (
-              <SceneCard key={asset.id} asset={asset} index={index + 1} />
+              <SceneCard
+                key={asset.id}
+                asset={asset}
+                index={index + 1}
+                onClick={() => setSelectedAsset(asset)}
+              />
             ))}
           </div>
         ) : (
           <div className="space-y-2">
             {scenesQuery.data.map((asset, index) => (
-              <SceneRow key={asset.id} asset={asset} index={index + 1} />
+              <SceneRow
+                key={asset.id}
+                asset={asset}
+                index={index + 1}
+                onClick={() => setSelectedAsset(asset)}
+              />
             ))}
           </div>
         )
@@ -98,11 +110,50 @@ export function ScenesTab({ projectId }: ScenesTabProps) {
           No scenes yet. Create a scene to organize your content.
         </div>
       )}
+
+      {selectedAsset && (
+        <Modal
+          isOpen={true}
+          onClose={() => setSelectedAsset(null)}
+          title={selectedAsset.title || 'Scene'}
+        >
+          <div className="p-4">
+            <div className="mb-4">
+              <span className="text-sm text-[var(--text-muted)]">Status: </span>
+              <Badge variant={selectedAsset.approval_state === 'approved' ? 'approved' : 'draft'}>
+                {selectedAsset.approval_state}
+              </Badge>
+            </div>
+            <div className="bg-[var(--bg-hover)] rounded p-4 max-h-96 overflow-auto">
+              <pre className="text-sm text-[var(--text-primary)] whitespace-pre-wrap">
+                {String(
+                  selectedAsset.current_approved_version?.content?.text ||
+                    selectedAsset.current_version?.content?.text ||
+                    JSON.stringify(
+                      selectedAsset.current_version?.content ||
+                        selectedAsset.current_approved_version?.content || { error: 'No content' },
+                      null,
+                      2
+                    )
+                )}
+              </pre>
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
 
-function SceneCard({ asset, index }: { asset: Asset; index: number }) {
+function SceneCard({
+  asset,
+  index,
+  onClick,
+}: {
+  asset: Asset;
+  index: number;
+  onClick: () => void;
+}) {
   const statusVariant =
     asset.approval_state === 'approved'
       ? 'approved'
@@ -110,8 +161,13 @@ function SceneCard({ asset, index }: { asset: Asset; index: number }) {
         ? 'warning'
         : 'draft';
 
+  const handleClick = () => onClick();
+
   return (
-    <div className="card hover:border-[var(--accent)] transition-colors cursor-pointer">
+    <div
+      className="card hover:border-[var(--accent)] transition-colors cursor-pointer"
+      onClick={handleClick}
+    >
       <div className="aspect-video bg-[var(--bg-hover)] rounded mb-3 flex items-center justify-center">
         <span className="text-3xl font-bold text-[var(--text-muted)]">{index}</span>
       </div>
@@ -128,7 +184,7 @@ function SceneCard({ asset, index }: { asset: Asset; index: number }) {
   );
 }
 
-function SceneRow({ asset, index }: { asset: Asset; index: number }) {
+function SceneRow({ asset, index, onClick }: { asset: Asset; index: number; onClick: () => void }) {
   const statusVariant =
     asset.approval_state === 'approved'
       ? 'approved'
@@ -136,8 +192,13 @@ function SceneRow({ asset, index }: { asset: Asset; index: number }) {
         ? 'warning'
         : 'draft';
 
+  const handleClick = () => onClick();
+
   return (
-    <div className="flex items-center gap-4 card hover:border-[var(--accent)] transition-colors cursor-pointer">
+    <div
+      className="flex items-center gap-4 card hover:border-[var(--accent)] transition-colors cursor-pointer"
+      onClick={handleClick}
+    >
       <div className="w-12 h-12 bg-[var(--bg-hover)] rounded flex items-center justify-center flex-shrink-0">
         <span className="font-bold text-[var(--text-muted)]">{index}</span>
       </div>

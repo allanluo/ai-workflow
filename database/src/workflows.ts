@@ -1,10 +1,10 @@
-import { createHash, randomUUID } from "node:crypto";
-import { desc, eq } from "drizzle-orm";
-import { db } from "./client.js";
-import { projectEvents, workflowDefinitions, workflowVersions } from "./schema.js";
+import { createHash, randomUUID } from 'node:crypto';
+import { desc, eq } from 'drizzle-orm';
+import { db } from './client.js';
+import { projectEvents, workflowDefinitions, workflowVersions } from './schema.js';
 
-type WorkflowMode = "simple" | "guided" | "advanced";
-type WorkflowDefinitionStatus = "draft" | "testing" | "approved" | "deprecated";
+type WorkflowMode = 'simple' | 'guided' | 'advanced';
+type WorkflowDefinitionStatus = 'draft' | 'testing' | 'approved' | 'deprecated';
 
 interface CreateWorkflowInput {
   title: string;
@@ -67,7 +67,7 @@ function mapWorkflowDefinition(row: typeof workflowDefinitions.$inferSelect) {
     id: row.id,
     project_id: row.projectId,
     title: row.title,
-    description: row.description ?? "",
+    description: row.description ?? '',
     mode: row.mode,
     status: row.status,
     template_type: row.templateType,
@@ -78,7 +78,7 @@ function mapWorkflowDefinition(row: typeof workflowDefinitions.$inferSelect) {
     defaults: safeParseJson(row.defaultsJson, {}),
     nodes: safeParseJson(row.nodesJson, []),
     edges: safeParseJson(row.edgesJson, []),
-    metadata: safeParseJson(row.metadataJson, {})
+    metadata: safeParseJson(row.metadataJson, {}),
   };
 }
 
@@ -96,8 +96,8 @@ function mapWorkflowVersion(row: typeof workflowVersions.$inferSelect) {
     frozen_workflow: safeParseJson(row.frozenWorkflowJson, {}),
     input_asset_versions: safeParseJson(row.inputAssetVersionsJson, {}),
     runtime_environment: safeParseJson(row.runtimeEnvironmentJson, {}),
-    notes: row.notes ?? "",
-    created_at: row.createdAt
+    notes: row.notes ?? '',
+    created_at: row.createdAt,
   };
 }
 
@@ -112,20 +112,20 @@ function insertWorkflowEvent(
       id: randomUUID(),
       projectId,
       eventType,
-      targetType: "workflow",
+      targetType: 'workflow',
       targetId,
       payloadJson: JSON.stringify(payload),
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
     })
     .run();
 }
 
 function computeGraphHash(payload: Record<string, unknown>) {
-  return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+  return createHash('sha256').update(JSON.stringify(payload)).digest('hex');
 }
 
 function asObjectRecord(value: unknown) {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
 }
@@ -139,11 +139,11 @@ function asWorkflowEdges(edges: unknown[]) {
 }
 
 function hasNonEmptyString(value: unknown) {
-  return typeof value === "string" && value.trim().length > 0;
+  return typeof value === 'string' && value.trim().length > 0;
 }
 
 function hasPositiveNumber(value: unknown) {
-  return typeof value === "number" && Number.isFinite(value) && value > 0;
+  return typeof value === 'number' && Number.isFinite(value) && value > 0;
 }
 
 function detectCycles(nodeIds: string[], edges: Array<{ source: string; target: string }>) {
@@ -190,50 +190,50 @@ function validateNodeConfig(
   const issues: string[] = [];
 
   switch (nodeType) {
-    case "input":
+    case 'input':
       if (!hasNonEmptyString(params.text)) {
         warnings.push(`Input node "${nodeId}" has no text yet.`);
       }
       break;
-    case "llm_text":
-    case "llm":
+    case 'llm_text':
+    case 'llm':
       if (!hasNonEmptyString(params.prompt)) {
-        issues.push("prompt is required");
+        issues.push('prompt is required');
       }
       break;
-    case "image_generation":
-    case "image":
-    case "generate_image":
+    case 'image_generation':
+    case 'image':
+    case 'generate_image':
       if (!hasNonEmptyString(params.prompt)) {
-        issues.push("prompt is required");
+        issues.push('prompt is required');
       }
       if (params.width !== undefined && !hasPositiveNumber(params.width)) {
-        issues.push("width must be a positive number");
+        issues.push('width must be a positive number');
       }
       if (params.height !== undefined && !hasPositiveNumber(params.height)) {
-        issues.push("height must be a positive number");
+        issues.push('height must be a positive number');
       }
       break;
-    case "video_generation":
-    case "video":
-    case "generate_video":
+    case 'video_generation':
+    case 'video':
+    case 'generate_video':
       if (!hasNonEmptyString(params.prompt)) {
-        issues.push("prompt is required");
+        issues.push('prompt is required');
       }
       if (params.width !== undefined && !hasPositiveNumber(params.width)) {
-        issues.push("width must be a positive number");
+        issues.push('width must be a positive number');
       }
       if (params.height !== undefined && !hasPositiveNumber(params.height)) {
-        issues.push("height must be a positive number");
+        issues.push('height must be a positive number');
       }
       break;
-    case "tts":
-    case "text_to_speech":
+    case 'tts':
+    case 'text_to_speech':
       if (!hasNonEmptyString(params.text)) {
-        issues.push("text is required");
+        issues.push('text is required');
       }
       break;
-    case "output":
+    case 'output':
       break;
     default:
       warnings.push(`Node "${nodeId}" uses unknown node type "${nodeType}".`);
@@ -241,11 +241,11 @@ function validateNodeConfig(
   }
 
   if (issues.length > 0) {
-    errors.push(`Node "${nodeId}" is invalid: ${issues.join(", ")}.`);
+    errors.push(`Node "${nodeId}" is invalid: ${issues.join(', ')}.`);
     invalidNodeConfigs.push({
       node_id: nodeId,
       node_type: nodeType,
-      issues
+      issues,
     });
   }
 }
@@ -260,31 +260,31 @@ export function createWorkflowDefinition(projectId: string, input: CreateWorkflo
       id,
       projectId,
       title: input.title,
-      description: input.description ?? "",
+      description: input.description ?? '',
       mode: input.mode,
-      status: "draft",
+      status: 'draft',
       templateType: input.template_type,
-      createdBy: "user",
+      createdBy: 'user',
       createdAt: timestamp,
       updatedAt: timestamp,
       defaultsJson: JSON.stringify(input.defaults ?? {}),
       nodesJson: JSON.stringify(input.nodes ?? []),
       edgesJson: JSON.stringify(input.edges ?? []),
-      metadataJson: JSON.stringify(input.metadata ?? {})
+      metadataJson: JSON.stringify(input.metadata ?? {}),
     })
     .run();
 
   // Create initial version
   const frozenWorkflow = {
     title: input.title,
-    description: input.description ?? "",
+    description: input.description ?? '',
     mode: input.mode,
-    status: "draft",
+    status: 'draft',
     template_type: input.template_type,
     nodes: input.nodes ?? [],
     edges: input.edges ?? [],
     defaults: input.defaults ?? {},
-    metadata: input.metadata ?? {}
+    metadata: input.metadata ?? {},
   };
   const graphHash = computeGraphHash(frozenWorkflow);
 
@@ -294,7 +294,7 @@ export function createWorkflowDefinition(projectId: string, input: CreateWorkflo
       workflowDefinitionId: id,
       projectId,
       versionNumber: 1,
-      status: "draft",
+      status: 'draft',
       approvedBy: null,
       approvedAt: null,
       graphHash,
@@ -302,21 +302,21 @@ export function createWorkflowDefinition(projectId: string, input: CreateWorkflo
       frozenWorkflowJson: JSON.stringify(frozenWorkflow),
       inputAssetVersionsJson: JSON.stringify({}),
       runtimeEnvironmentJson: JSON.stringify({}),
-      notes: "Initial version",
-      createdAt: timestamp
+      notes: 'Initial version',
+      createdAt: timestamp,
     })
     .run();
 
-  insertWorkflowEvent(projectId, id, "workflow_created", {
+  insertWorkflowEvent(projectId, id, 'workflow_created', {
     title: input.title,
-    template_type: input.template_type
+    template_type: input.template_type,
   });
 
   const workflow = getWorkflowDefinitionById(id)!;
   // Manually set the current version id since we just created it
   return {
     ...workflow,
-    current_version_id: versionId
+    current_version_id: versionId,
   };
 }
 
@@ -363,16 +363,34 @@ export function updateWorkflowDefinition(workflowId: string, input: UpdateWorkfl
       edgesJson: input.edges === undefined ? existing.edgesJson : JSON.stringify(input.edges),
       metadataJson:
         input.metadata === undefined ? existing.metadataJson : JSON.stringify(input.metadata),
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
     })
     .where(eq(workflowDefinitions.id, workflowId))
     .run();
 
-  insertWorkflowEvent(existing.projectId, workflowId, "workflow_updated", {
-    status: input.status ?? existing.status
+  insertWorkflowEvent(existing.projectId, workflowId, 'workflow_updated', {
+    status: input.status ?? existing.status,
   });
 
   return getWorkflowDefinitionById(workflowId);
+}
+
+export function deleteWorkflowDefinition(workflowId: string): boolean {
+  const existing = db
+    .select()
+    .from(workflowDefinitions)
+    .where(eq(workflowDefinitions.id, workflowId))
+    .get();
+
+  if (!existing) {
+    return false;
+  }
+
+  db.delete(workflowDefinitions).where(eq(workflowDefinitions.id, workflowId)).run();
+
+  insertWorkflowEvent(existing.projectId, workflowId, 'workflow_deleted', {});
+
+  return true;
 }
 
 export function validateWorkflowDefinition(workflowId: string) {
@@ -386,7 +404,7 @@ export function validateWorkflowDefinition(workflowId: string) {
   const errors: string[] = [];
 
   if (!workflow.title.trim()) {
-    errors.push("Workflow title is required.");
+    errors.push('Workflow title is required.');
   }
 
   const missingReferences: Array<Record<string, unknown>> = [];
@@ -394,15 +412,15 @@ export function validateWorkflowDefinition(workflowId: string) {
   const invalidNodeConfigs: Array<Record<string, unknown>> = [];
 
   if (!Array.isArray(workflow.nodes)) {
-    errors.push("Workflow nodes must be an array.");
+    errors.push('Workflow nodes must be an array.');
   }
 
   if (!Array.isArray(workflow.edges)) {
-    errors.push("Workflow edges must be an array.");
+    errors.push('Workflow edges must be an array.');
   }
 
   if (Array.isArray(workflow.nodes) && workflow.nodes.length === 0) {
-    warnings.push("Workflow has no nodes yet.");
+    warnings.push('Workflow has no nodes yet.');
   }
 
   if (Array.isArray(workflow.nodes)) {
@@ -412,8 +430,8 @@ export function validateWorkflowDefinition(workflowId: string) {
     const outboundCounts = new Map<string, number>();
 
     nodes.forEach((node, index) => {
-      const nodeId = typeof node.id === "string" ? node.id.trim() : "";
-      const nodeType = typeof node.type === "string" ? node.type.trim() : "";
+      const nodeId = typeof node.id === 'string' ? node.id.trim() : '';
+      const nodeType = typeof node.type === 'string' ? node.type.trim() : '';
       const params = asObjectRecord(node.params);
 
       if (!nodeId) {
@@ -442,9 +460,9 @@ export function validateWorkflowDefinition(workflowId: string) {
       const normalizedEdges: Array<{ source: string; target: string }> = [];
 
       edges.forEach((edge, index) => {
-        const edgeId = typeof edge.id === "string" ? edge.id.trim() : "";
-        const source = typeof edge.source === "string" ? edge.source.trim() : "";
-        const target = typeof edge.target === "string" ? edge.target.trim() : "";
+        const edgeId = typeof edge.id === 'string' ? edge.id.trim() : '';
+        const source = typeof edge.source === 'string' ? edge.source.trim() : '';
+        const target = typeof edge.target === 'string' ? edge.target.trim() : '';
 
         if (!edgeId) {
           errors.push(`Edge ${index + 1} is missing an id.`);
@@ -462,18 +480,18 @@ export function validateWorkflowDefinition(workflowId: string) {
         if (!nodeIds.has(source)) {
           errors.push(`Edge "${edgeId}" references missing source node "${source}".`);
           missingReferences.push({
-            type: "missing_source_node",
+            type: 'missing_source_node',
             edge_id: edgeId,
-            node_id: source
+            node_id: source,
           });
         }
 
         if (!nodeIds.has(target)) {
           errors.push(`Edge "${edgeId}" references missing target node "${target}".`);
           missingReferences.push({
-            type: "missing_target_node",
+            type: 'missing_target_node',
             edge_id: edgeId,
-            node_id: target
+            node_id: target,
           });
         }
 
@@ -489,13 +507,13 @@ export function validateWorkflowDefinition(workflowId: string) {
       });
 
       if (nodeIds.size > 0 && detectCycles([...nodeIds], normalizedEdges)) {
-        errors.push("Workflow graph contains a cycle. v1 workflows must remain acyclic.");
+        errors.push('Workflow graph contains a cycle. v1 workflows must remain acyclic.');
       }
     }
 
     nodes.forEach(node => {
-      const nodeId = typeof node.id === "string" ? node.id.trim() : "";
-      const nodeType = typeof node.type === "string" ? node.type.trim() : "";
+      const nodeId = typeof node.id === 'string' ? node.id.trim() : '';
+      const nodeType = typeof node.type === 'string' ? node.type.trim() : '';
 
       if (!nodeId || !nodeType) {
         return;
@@ -504,38 +522,38 @@ export function validateWorkflowDefinition(workflowId: string) {
       const inbound = inboundCounts.get(nodeId) ?? 0;
       const outbound = outboundCounts.get(nodeId) ?? 0;
 
-      if (nodeType === "input" && inbound > 0) {
+      if (nodeType === 'input' && inbound > 0) {
         warnings.push(`Input node "${nodeId}" should not have inbound edges.`);
       }
 
-      if (nodeType !== "input" && inbound === 0) {
+      if (nodeType !== 'input' && inbound === 0) {
         warnings.push(`Node "${nodeId}" has no inbound connection.`);
         missingBindings.push({
-          type: "missing_inbound_connection",
-          node_id: nodeId
+          type: 'missing_inbound_connection',
+          node_id: nodeId,
         });
       }
 
-      if (nodeType === "output" && outbound > 0) {
+      if (nodeType === 'output' && outbound > 0) {
         warnings.push(`Output node "${nodeId}" should not have outbound edges.`);
       }
 
-      if (nodeType !== "output" && outbound === 0) {
+      if (nodeType !== 'output' && outbound === 0) {
         warnings.push(`Node "${nodeId}" has no downstream connection.`);
         missingBindings.push({
-          type: "missing_outbound_connection",
-          node_id: nodeId
+          type: 'missing_outbound_connection',
+          node_id: nodeId,
         });
       }
     });
   }
 
-  const status = errors.length > 0 ? "fail" : warnings.length > 0 ? "warn" : "pass";
+  const status = errors.length > 0 ? 'fail' : warnings.length > 0 ? 'warn' : 'pass';
 
-  insertWorkflowEvent(workflow.project_id, workflowId, "workflow_validated", {
+  insertWorkflowEvent(workflow.project_id, workflowId, 'workflow_validated', {
     status,
     warning_count: warnings.length,
-    error_count: errors.length
+    error_count: errors.length,
   });
 
   return {
@@ -544,19 +562,19 @@ export function validateWorkflowDefinition(workflowId: string) {
     missing_bindings: missingBindings,
     invalid_node_configs: invalidNodeConfigs,
     warnings,
-    errors
+    errors,
   };
 }
 
-export function createWorkflowVersion(
-  workflowId: string,
-  input: CreateWorkflowVersionInput
-) {
+export function createWorkflowVersion(workflowId: string, input: CreateWorkflowVersionInput) {
   const workflow = getWorkflowDefinitionById(workflowId);
 
   if (!workflow) {
     return null;
   }
+
+  console.log('[Freeze] Creating version for workflow', workflowId);
+  console.log('[Freeze] Workflow nodes:', JSON.stringify(workflow.nodes?.slice(0, 5)));
 
   const latestVersion = db
     .select()
@@ -576,7 +594,7 @@ export function createWorkflowVersion(
     nodes: workflow.nodes,
     edges: workflow.edges,
     defaults: workflow.defaults,
-    metadata: workflow.metadata
+    metadata: workflow.metadata,
   };
   const graphHash = computeGraphHash(frozenWorkflow);
   const timestamp = new Date().toISOString();
@@ -587,30 +605,30 @@ export function createWorkflowVersion(
       workflowDefinitionId: workflowId,
       projectId: workflow.project_id,
       versionNumber,
-      status: "approved",
-      approvedBy: "user",
+      status: 'approved',
+      approvedBy: 'user',
       approvedAt: timestamp,
       graphHash,
       templateType: workflow.template_type,
       frozenWorkflowJson: JSON.stringify(frozenWorkflow),
       inputAssetVersionsJson: JSON.stringify(input.input_asset_versions ?? {}),
       runtimeEnvironmentJson: JSON.stringify(input.runtime_environment ?? {}),
-      notes: input.notes ?? "",
-      createdAt: timestamp
+      notes: input.notes ?? '',
+      createdAt: timestamp,
     })
     .run();
 
   db.update(workflowDefinitions)
     .set({
-      status: "approved",
-      updatedAt: timestamp
+      status: 'approved',
+      updatedAt: timestamp,
     })
     .where(eq(workflowDefinitions.id, workflowId))
     .run();
 
-  insertWorkflowEvent(workflow.project_id, workflowId, "workflow_version_created", {
+  insertWorkflowEvent(workflow.project_id, workflowId, 'workflow_version_created', {
     workflow_version_id: id,
-    version_number: versionNumber
+    version_number: versionNumber,
   });
 
   return getWorkflowVersionById(id);

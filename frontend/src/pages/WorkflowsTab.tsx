@@ -4,6 +4,7 @@ import {
   createWorkflow,
   createWorkflowRun,
   createWorkflowVersion,
+  deleteWorkflow,
   fetchNodeRuns,
   fetchProjectWorkflowRuns,
   fetchProjectWorkflows,
@@ -32,38 +33,20 @@ interface WorkflowsTabProps {
   projectId: string;
 }
 
-interface EditableNode {
-  id: string;
-  type: string;
-  catalogType: string;
-  label: string;
-  params: Record<string, unknown>;
-  data: Record<string, unknown>;
-  position: {
-    x: number;
-    y: number;
-  };
-}
+import {
+  useDraftStore,
+  type EditableNode,
+  type EditableEdge,
+  type WorkflowDraftState,
+  toDraftState,
+  serializeDraft,
+  buildWorkflowPayload,
+  toEditableNode,
+  toEditableEdge,
+  getEditableNodeDefinition,
+} from '../stores/draftStore';
 
 const WORKFLOW_NODE_DRAG_MIME = 'application/x-ai-workflow-node';
-
-interface EditableEdge {
-  id: string;
-  source: string;
-  target: string;
-}
-
-interface WorkflowDraftState {
-  title: string;
-  description: string;
-  mode: WorkflowDefinition['mode'];
-  status: WorkflowDefinition['status'];
-  templateType: string;
-  defaultsText: string;
-  metadataText: string;
-  nodes: EditableNode[];
-  edges: EditableEdge[];
-}
 
 const categoryLabels: Record<WorkflowNodeCategory, string> = {
   input: 'Inputs',
@@ -91,7 +74,7 @@ export function WorkflowsTab({ projectId }: WorkflowsTabProps) {
   const clearWorkflowSelection = useSelectionStore(s => s.clearWorkflowSelection);
   const { setRightPanelTab, setRightPanelOpen } = usePanelStore();
   const [selectedRun, setSelectedRun] = useState<string | null>(null);
-  const [draft, setDraft] = useState<WorkflowDraftState | null>(null);
+  const { draft, setDraft } = useDraftStore();
   const [draftError, setDraftError] = useState<string | null>(null);
   const [freezeNotes, setFreezeNotes] = useState('');
   const [lastValidation, setLastValidation] = useState<WorkflowValidation | null>(null);
@@ -259,6 +242,26 @@ export function WorkflowsTab({ projectId }: WorkflowsTabProps) {
     },
   });
 
+  const deleteWorkflowMutation = useMutation({
+    mutationFn: deleteWorkflow,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['project-workflows', projectId] });
+      clearWorkflowSelection();
+      showToast({
+        type: 'success',
+        title: 'Workflow deleted',
+        message: 'Workflow removed successfully',
+      });
+    },
+    onError: error => {
+      showToast({
+        type: 'error',
+        title: 'Delete failed',
+        message: error instanceof Error ? error.message : 'Unable to delete workflow',
+      });
+    },
+  });
+
   const versionIds = versionsQuery.data?.map(version => version.id) ?? [];
   const workflowRuns =
     runsQuery.data?.filter(run => versionIds.includes(run.workflow_version_id)) ?? [];
@@ -271,11 +274,21 @@ export function WorkflowsTab({ projectId }: WorkflowsTabProps) {
 
   async function persistDraft() {
     if (!selectedWorkflowId || !draft) {
+      console.log('persistDraft: no workflow or draft', {
+        selectedWorkflowId: !!selectedWorkflowId,
+        hasDraft: !!draft,
+      });
       return null;
     }
 
     try {
       const payload = buildWorkflowPayload(draft);
+      console.log(
+        'Canvas Save - saving nodes:',
+        payload.nodes?.length,
+        'edges:',
+        payload.edges?.length
+      );
       setDraftError(null);
       return await updateWorkflowMutation.mutateAsync({
         workflowId: selectedWorkflowId,
@@ -466,10 +479,34 @@ export function WorkflowsTab({ projectId }: WorkflowsTabProps) {
           }}
         >
           <div className="absolute inset-0 flex items-center justify-center">
-            <div className="text-center bg-[var(--bg-elevated)] p-6 rounded-lg border border-[var(--border-light)] shadow-lg">
-              <p className="text-lg text-[var(--text-primary)] font-medium">Select a workflow</p>
-              <p className="text-sm text-[var(--text-muted)] mt-2">
-                Use the Workflows button in the sidebar to select a workflow
+            <div className="text-center bg-[var(--bg-elevated)] p-8 rounded-lg border border-[var(--border-light)] shadow-lg max-w-md">
+              <p className="text-lg text-[var(--text-primary)] font-medium mb-4">
+                Create a Workflow
+              </p>
+              <p className="text-sm text-[var(--text-muted)] mb-6">
+                Choose a template to get started
+              </p>
+              <div className="grid grid-cols-1 gap-3">
+                {workflowTemplateCatalog.map(template => (
+                  <button
+                    key={template.id}
+                    onClick={() => handleCreateWorkflowFromTemplate(template.id)}
+                    className="p-4 text-left rounded-lg border border-[var(--border)] hover:border-[var(--accent)] hover:bg-[var(--accent)]/5 transition-colors"
+                  >
+                    <div className="text-sm font-medium text-[var(--text-primary)]">
+                      {template.title}
+                    </div>
+                    <div className="text-xs text-[var(--text-muted)] mt-1">
+                      {template.description}
+                    </div>
+                    <div className="text-xs text-[var(--text-muted)] mt-2">
+                      {template.nodes.length} nodes
+                    </div>
+                  </button>
+                ))}
+              </div>
+              <p className="text-xs text-[var(--text-muted)] mt-4">
+                Or select an existing workflow from the sidebar
               </p>
             </div>
           </div>
@@ -586,7 +623,7 @@ export function WorkflowsTab({ projectId }: WorkflowsTabProps) {
                     void persistDraft();
                   }}
                   disabled={updateWorkflowMutation.isPending}
-                  className="rounded-full bg-slate-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
+                  className="rounded-full bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {updateWorkflowMutation.isPending ? 'Saving...' : 'Save Draft'}
                 </button>
@@ -595,7 +632,7 @@ export function WorkflowsTab({ projectId }: WorkflowsTabProps) {
                     void handleValidate();
                   }}
                   disabled={validateWorkflowMutation.isPending || updateWorkflowMutation.isPending}
-                  className="rounded-full border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                  className="rounded-full border border-[var(--border-light)] bg-[var(--bg-hover)] px-4 py-2 text-sm font-medium text-[var(--text-primary)] transition hover:bg-[var(--bg-active)] disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {validateWorkflowMutation.isPending ? 'Validating...' : 'Validate Draft'}
                 </button>
@@ -613,9 +650,20 @@ export function WorkflowsTab({ projectId }: WorkflowsTabProps) {
                     void handleRunLatestVersion();
                   }}
                   disabled={createRunMutation.isPending}
-                  className="rounded-full border border-blue-300 bg-blue-50 px-4 py-2 text-sm font-medium text-blue-700 transition hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+                  className="rounded-full border border-[var(--success)] bg-[var(--success)]/20 px-4 py-2 text-sm font-medium text-[var(--success)] transition hover:bg-[var(--success)]/30 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {updateWorkflowMutation.isPending ? 'Starting...' : 'Run Latest Version'}
+                </button>
+                <button
+                  onClick={() => {
+                    if (confirm('Delete this workflow? This cannot be undone.')) {
+                      deleteWorkflowMutation.mutate(selectedWorkflowId!);
+                    }
+                  }}
+                  disabled={deleteWorkflowMutation.isPending}
+                  className="rounded-full border border-rose-300 bg-rose-50 px-4 py-2 text-sm font-medium text-rose-600 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {deleteWorkflowMutation.isPending ? 'Deleting...' : 'Delete'}
                 </button>
               </div>
 
@@ -1595,170 +1643,11 @@ function VersionRow({ version }: { version: WorkflowVersion }) {
   );
 }
 
-function toDraftState(workflow: WorkflowDefinition): WorkflowDraftState {
-  return {
-    title: workflow.title,
-    description: workflow.description,
-    mode: 'advanced',
-    status: workflow.status,
-    templateType: workflow.template_type,
-    defaultsText: formatJson(workflow.defaults),
-    metadataText: formatJson(workflow.metadata),
-    nodes: Array.isArray(workflow.nodes) ? workflow.nodes.map(toEditableNode) : [],
-    edges: Array.isArray(workflow.edges) ? workflow.edges.map(toEditableEdge) : [],
-  };
-}
+/* Helpers moved to draftStore.ts */
 
-function serializeDraft(draft: WorkflowDraftState) {
-  return JSON.stringify({
-    title: draft.title,
-    description: draft.description,
-    mode: draft.mode,
-    status: draft.status,
-    templateType: draft.templateType,
-    defaultsText: draft.defaultsText,
-    metadataText: draft.metadataText,
-    nodes: draft.nodes,
-    edges: draft.edges,
-  });
-}
+/* Helpers moved to draftStore.ts */
 
-function formatJson(value: unknown) {
-  return JSON.stringify(value ?? {}, null, 2);
-}
-
-function parseJsonRecord(text: string, label: string) {
-  try {
-    const parsed = JSON.parse(text || '{}') as unknown;
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      throw new Error(`${label} must be a JSON object`);
-    }
-    return parsed as Record<string, unknown>;
-  } catch (error) {
-    if (error instanceof Error) {
-      throw error;
-    }
-    throw new Error(`Invalid ${label.toLowerCase()} JSON`);
-  }
-}
-
-function buildWorkflowPayload(draft: WorkflowDraftState) {
-  const defaults = parseJsonRecord(draft.defaultsText, 'Defaults');
-  const metadata = parseJsonRecord(draft.metadataText, 'Metadata');
-  const nodes = draft.nodes.map((node, index) => {
-    const nodeId = node.id.trim();
-    const nodeType = node.type.trim();
-
-    if (!nodeId) {
-      throw new Error(`Step ${index + 1} is missing an id`);
-    }
-
-    if (!nodeType) {
-      throw new Error(`Step ${index + 1} is missing a runtime type`);
-    }
-
-    return {
-      id: nodeId,
-      type: nodeType,
-      params: node.params,
-      data: {
-        ...node.data,
-        label: node.label.trim(),
-        catalog_type: node.catalogType,
-        graph_position: node.position,
-      },
-    };
-  });
-
-  const edges = draft.edges.map((edge, index) => {
-    const edgeId = edge.id.trim();
-    const source = edge.source.trim();
-    const target = edge.target.trim();
-
-    if (!edgeId) {
-      throw new Error(`Connection ${index + 1} is missing an id`);
-    }
-
-    if (!source || !target) {
-      throw new Error(`Connection ${index + 1} must include source and target`);
-    }
-
-    return { id: edgeId, source, target };
-  });
-
-  return {
-    title: draft.title.trim(),
-    description: draft.description.trim(),
-    mode: draft.mode,
-    status: draft.status,
-    template_type: draft.templateType.trim(),
-    defaults,
-    metadata,
-    nodes,
-    edges,
-  };
-}
-
-function toEditableNode(node: unknown): EditableNode {
-  const value = typeof node === 'object' && node !== null ? (node as Record<string, unknown>) : {};
-  const data =
-    typeof value.data === 'object' && value.data !== null && !Array.isArray(value.data)
-      ? (value.data as Record<string, unknown>)
-      : {};
-  const params =
-    typeof value.params === 'object' && value.params !== null && !Array.isArray(value.params)
-      ? (value.params as Record<string, unknown>)
-      : {};
-
-  const catalogType =
-    typeof data.catalog_type === 'string' ? data.catalog_type : inferCatalogType(value.type);
-
-  return {
-    id: typeof value.id === 'string' ? value.id : `node-${Math.random().toString(36).slice(2, 7)}`,
-    type: typeof value.type === 'string' ? value.type : 'input',
-    catalogType,
-    label:
-      typeof data.label === 'string'
-        ? data.label
-        : (getWorkflowNodeDefinition(catalogType)?.defaultLabel ?? 'Workflow Step'),
-    params,
-    data,
-    position: getGraphPosition(data) ?? { x: 0, y: 0 },
-  };
-}
-
-function toEditableEdge(edge: unknown): EditableEdge {
-  const value = typeof edge === 'object' && edge !== null ? (edge as Record<string, unknown>) : {};
-
-  return {
-    id: typeof value.id === 'string' ? value.id : `edge-${Math.random().toString(36).slice(2, 7)}`,
-    source: typeof value.source === 'string' ? value.source : '',
-    target: typeof value.target === 'string' ? value.target : '',
-  };
-}
-
-function inferCatalogType(runtimeType: unknown) {
-  switch (runtimeType) {
-    case 'input':
-      return 'story_input';
-    case 'llm_text':
-      return 'generate_scenes';
-    case 'image_generation':
-      return 'generate_image';
-    case 'video_generation':
-      return 'generate_video_clip';
-    case 'tts':
-      return 'generate_narration';
-    case 'output':
-      return 'render_preview';
-    default:
-      return 'story_input';
-  }
-}
-
-function getEditableNodeDefinition(node: EditableNode) {
-  return getWorkflowNodeDefinition(node.catalogType);
-}
+/* Helper moved to draftStore.ts */
 
 function buildGraphColumns(nodes: EditableNode[], edges: EditableEdge[]) {
   if (nodes.length === 0) {
@@ -1819,22 +1708,7 @@ function buildGraphColumns(nodes: EditableNode[], edges: EditableEdge[]) {
   return columns;
 }
 
-function getGraphPosition(data: Record<string, unknown>) {
-  const candidate = data.graph_position;
-  if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) {
-    return null;
-  }
-
-  const record = candidate as Record<string, unknown>;
-  if (typeof record.x !== 'number' || typeof record.y !== 'number') {
-    return null;
-  }
-
-  return {
-    x: record.x,
-    y: record.y,
-  };
-}
+/* Helper moved to draftStore.ts */
 
 function buildGraphLayout(nodes: EditableNode[], edges: EditableEdge[]) {
   const columns = buildGraphColumns(nodes, edges);

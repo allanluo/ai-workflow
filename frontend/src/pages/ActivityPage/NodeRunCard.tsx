@@ -16,7 +16,20 @@ const statusConfig = {
 
 export function NodeRunCard({ nodeRun, isSelected, onClick }: NodeRunCardProps) {
   const [isExpanded, setIsExpanded] = useState(false);
-  const status = statusConfig[nodeRun.status];
+  const [showOutput, setShowOutput] = useState(false);
+  const status = statusConfig[nodeRun.status as keyof typeof statusConfig] || statusConfig.pending;
+
+  const isFinished = nodeRun.status === 'completed' || nodeRun.status === 'failed';
+  const hasOutput = nodeRun.output && Object.keys(nodeRun.output).length > 0;
+  console.log(
+    'NodeRunCard debug:',
+    nodeRun.nodeName,
+    'hasOutput:',
+    hasOutput,
+    'output:',
+    JSON.stringify(nodeRun.output).slice(0, 100)
+  );
+  const showOutputButton = hasOutput || nodeRun.status === 'failed';
 
   return (
     <div
@@ -46,17 +59,36 @@ export function NodeRunCard({ nodeRun, isSelected, onClick }: NodeRunCardProps) 
               {isExpanded ? 'Hide' : 'Logs'}
             </button>
           )}
+          {showOutputButton && (
+            <button
+              onClick={e => {
+                e.stopPropagation();
+                setShowOutput(!showOutput);
+              }}
+              className="text-xs text-green-600 hover:underline"
+            >
+              {showOutput ? 'Hide' : nodeRun.status === 'failed' ? 'Error Details' : 'Output'}
+            </button>
+          )}
         </div>
       </div>
 
       {isExpanded && nodeRun.logs.length > 0 && (
         <div className="border-t border-slate-200 p-3 bg-slate-50">
           <div className="font-mono text-xs text-slate-600 space-y-1">
-            {nodeRun.logs.map((log, i) => (
+            {nodeRun.logs.map((log: string, i: number) => (
               <div key={i} className="whitespace-pre-wrap">
                 {log}
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {showOutput && showOutputButton && (
+        <div className="border-t border-slate-200 p-3 bg-green-50">
+          <div className="font-mono text-xs text-slate-700 whitespace-pre-wrap">
+            {JSON.stringify(nodeRun.output, null, 2)}
           </div>
         </div>
       )}

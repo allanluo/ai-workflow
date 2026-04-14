@@ -20,7 +20,7 @@ export const config = {
   localAIAPI: {
     enabled: process.env.LOCAL_AI_API_ENABLED !== 'false',
     endpoint: process.env.LOCAL_AI_API_ENDPOINT ?? 'http://10.0.0.20:8001',
-    health_check_timeout_ms: Number(process.env.LOCAL_AI_API_HEALTH_CHECK_TIMEOUT ?? 5000),
+    health_check_timeout_ms: Number(process.env.LOCAL_AI_API_HEALTH_CHECK_TIMEOUT ?? 120000),
   },
 
   defaults: {

@@ -55,7 +55,8 @@ function buildNodeInputSnapshot(
     node_id: nodeId,
     node_type: nodeType,
     params,
-    resolved_input: resolvedInputSnapshot[nodeId] ?? null,
+    resolved_input: resolvedInputSnapshot,
+    _debug_keys: Object.keys(resolvedInputSnapshot),
   };
 }
 
@@ -76,18 +77,51 @@ function getRetryPolicyForNode(nodeType: string): RetryPolicy {
 }
 
 async function executeLLMNode(
-  params: Record<string, unknown>,
+  snapshot: Record<string, unknown>,
   nodeRunId: string
 ): Promise<Record<string, unknown>> {
-  const prompt = typeof params.prompt === 'string' ? params.prompt : '';
-  const model = typeof params.model === 'string' ? params.model : config.defaults.llm_model;
+  const innerParams = (snapshot.params as Record<string, unknown>) || {};
+  const baseInstructions = typeof innerParams.prompt === 'string' ? innerParams.prompt : '';
+  let sourceContent = '';
 
-  if (!prompt) {
-    throw new Error("LLM node requires a 'prompt' parameter");
+  // Collect text from all previous node outputs
+  if (snapshot.resolved_input) {
+    const resolved = snapshot.resolved_input as Record<string, unknown>;
+    const contents: string[] = [];
+    for (const key of Object.keys(resolved)) {
+      const prevOutput = resolved[key] as Record<string, unknown>;
+      // Look for 'text' field (common for LLM/Input nodes)
+      if (prevOutput && typeof prevOutput.text === 'string' && prevOutput.text) {
+        contents.push(prevOutput.text);
+      }
+    }
+    sourceContent = contents.join('\n\n');
+  }
+
+  // Final prompt assembly: instructions + source material
+  let finalPrompt = '';
+  if (baseInstructions && sourceContent) {
+    finalPrompt = `${baseInstructions}\n\n### SOURCE CONTENT ###\n${sourceContent}`;
+  } else {
+    finalPrompt = baseInstructions || sourceContent;
+  }
+
+  const model =
+    typeof innerParams.model === 'string' ? innerParams.model : config.defaults.llm_model;
+
+  console.log('[LLM] Request:', {
+    model,
+    instructionLength: baseInstructions.length,
+    contentLength: sourceContent.length,
+    finalPromptFirstChars: finalPrompt.slice(0, 100),
+  });
+
+  if (!finalPrompt) {
+    throw new Error("LLM node requires a 'prompt' parameter or preceding node output with text");
   }
 
   const response = await executeWithRetry(
-    () => adapters.generateText({ model, prompt }),
+    () => adapters.generateText({ model, prompt: finalPrompt }),
     getRetryPolicyForNode('llm')
   );
 
@@ -98,12 +132,13 @@ async function executeLLMNode(
 }
 
 async function executeTTSNode(
-  params: Record<string, unknown>,
+  snapshot: Record<string, unknown>,
   nodeRunId: string
 ): Promise<Record<string, unknown>> {
-  const text = typeof params.text === 'string' ? params.text : '';
+  const innerParams = (snapshot.params as Record<string, unknown>) || {};
+  const text = typeof innerParams.text === 'string' ? innerParams.text : '';
   const template =
-    typeof params.template === 'string' ? params.template : config.defaults.tts_voice;
+    typeof innerParams.template === 'string' ? innerParams.template : config.defaults.tts_voice;
 
   if (!text) {
     throw new Error("TTS node requires a 'text' parameter");
@@ -114,8 +149,8 @@ async function executeTTSNode(
       adapters.generateSpeech({
         text,
         template,
-        speed: typeof params.speed === 'number' ? params.speed : 1.0,
-        volume: typeof params.volume === 'number' ? params.volume : 1.0,
+        speed: typeof innerParams.speed === 'number' ? innerParams.speed : 1.0,
+        volume: typeof innerParams.volume === 'number' ? innerParams.volume : 1.0,
       }),
     getRetryPolicyForNode('tts')
   );
@@ -140,10 +175,11 @@ async function executeTTSNode(
 }
 
 async function executeImageNode(
-  params: Record<string, unknown>,
+  snapshot: Record<string, unknown>,
   nodeRunId: string
 ): Promise<Record<string, unknown>> {
-  const prompt = typeof params.prompt === 'string' ? params.prompt : '';
+  const innerParams = (snapshot.params as Record<string, unknown>) || {};
+  const prompt = typeof innerParams.prompt === 'string' ? innerParams.prompt : '';
 
   if (!prompt) {
     throw new Error("Image node requires a 'prompt' parameter");
@@ -153,8 +189,8 @@ async function executeImageNode(
     () =>
       adapters.generateImage({
         prompt,
-        width: typeof params.width === 'number' ? params.width : 1024,
-        height: typeof params.height === 'number' ? params.height : 1024,
+        width: typeof innerParams.width === 'number' ? innerParams.width : 1024,
+        height: typeof innerParams.height === 'number' ? innerParams.height : 1024,
       }),
     getRetryPolicyForNode('image')
   );
@@ -179,10 +215,11 @@ async function executeImageNode(
 }
 
 async function executeVideoNode(
-  params: Record<string, unknown>,
+  snapshot: Record<string, unknown>,
   nodeRunId: string
 ): Promise<Record<string, unknown>> {
-  const prompt = typeof params.prompt === 'string' ? params.prompt : '';
+  const innerParams = (snapshot.params as Record<string, unknown>) || {};
+  const prompt = typeof innerParams.prompt === 'string' ? innerParams.prompt : '';
 
   if (!prompt) {
     throw new Error("Video node requires a 'prompt' parameter");
@@ -192,8 +229,8 @@ async function executeVideoNode(
     () =>
       adapters.createVideo({
         prompt,
-        width: typeof params.width === 'number' ? params.width : 1024,
-        height: typeof params.height === 'number' ? params.height : 576,
+        width: typeof innerParams.width === 'number' ? innerParams.width : 1024,
+        height: typeof innerParams.height === 'number' ? innerParams.height : 576,
       }),
     getRetryPolicyForNode('video')
   );
@@ -219,7 +256,7 @@ async function executeVideoNode(
 
 async function executeNode(
   node: WorkflowNode,
-  params: Record<string, unknown>,
+  snapshot: Record<string, unknown>,
   nodeRunId: string
 ): Promise<Record<string, unknown>> {
   const nodeType = getNodeType(node);
@@ -228,21 +265,24 @@ async function executeNode(
     switch (nodeType) {
       case 'llm_text':
       case 'llm':
-        return await executeLLMNode(params, nodeRunId);
+      case 'extract_canon':
+      case 'generate_scenes':
+      case 'generate_shot_plan':
+        return await executeLLMNode(snapshot, nodeRunId);
 
       case 'tts':
       case 'text_to_speech':
-        return await executeTTSNode(params, nodeRunId);
+        return await executeTTSNode(snapshot, nodeRunId);
 
       case 'image':
       case 'image_generation':
       case 'generate_image':
-        return await executeImageNode(params, nodeRunId);
+        return await executeImageNode(snapshot, nodeRunId);
 
       case 'video':
       case 'video_generation':
       case 'generate_video':
-        return await executeVideoNode(params, nodeRunId);
+        return await executeVideoNode(snapshot, nodeRunId);
 
       case 'asset_query':
         return {
@@ -250,7 +290,76 @@ async function executeNode(
           selected_assets: [],
         };
 
+      case 'asset_review':
+      case 'review_node': {
+        console.log('=== ASSET REVIEW NODE DEBUG ===');
+        console.log('[asset_review] snapshot type:', typeof snapshot);
+        console.log('[asset_review] snapshot keys:', Object.keys(snapshot));
+        console.log(
+          '[asset_review] FULL snapshot:',
+          JSON.stringify(snapshot, null, 2).slice(0, 2000)
+        );
+
+        // Direct check for resolved_input at top level
+        const resolvedInput = (snapshot as Record<string, unknown>).resolved_input;
+        console.log('[asset_review] resolved_input:', resolvedInput);
+        console.log('[asset_review] resolved_input type:', typeof resolvedInput);
+
+        const reviewSnapshot = snapshot as Record<string, unknown>;
+        const reviewParams = (reviewSnapshot.params as Record<string, unknown>) || {};
+        console.log('[asset_review] reviewParams:', reviewParams);
+
+        // If user has provided edited_text, use it as the definitive output
+        if (typeof reviewParams.edited_text === 'string' && reviewParams.edited_text) {
+          console.log('[asset_review] using edited_text from params');
+          return { text: reviewParams.edited_text };
+        }
+
+        // Otherwise, pull from resolved_input (aggregate all unique text)
+        let fallbackText = '';
+        console.log('[asset_review] checking resolvedInput, truthy:', !!resolvedInput);
+        if (resolvedInput && typeof resolvedInput === 'object') {
+          const resolved = resolvedInput as Record<string, unknown>;
+          console.log('[asset_review] resolved keys:', Object.keys(resolved));
+          const pieces: string[] = [];
+          for (const key of Object.keys(resolved)) {
+            const prev = resolved[key];
+            console.log(`[asset_review] prev node ${key}:`, JSON.stringify(prev).slice(0, 200));
+            if (prev && typeof prev === 'object') {
+              const prevObj = prev as Record<string, unknown>;
+              if (typeof prevObj.text === 'string' && prevObj.text) {
+                pieces.push(prevObj.text);
+              }
+            }
+          }
+          fallbackText = pieces.join('\n\n');
+        }
+
+        console.log('[asset_review] final fallbackText:', fallbackText?.slice(0, 100));
+
+        return { text: fallbackText };
+      }
+
       case 'input':
+        // Return the node's text param as output for the next node
+        // Check nested params structure
+        const p = snapshot as Record<string, unknown>;
+        const innerParams = (p.params as Record<string, unknown>) || p;
+        const textValue =
+          typeof innerParams.text === 'string'
+            ? innerParams.text
+            : typeof innerParams.prompt === 'string'
+              ? innerParams.prompt
+              : '';
+        console.log(
+          '[input node] innerParams:',
+          JSON.stringify(innerParams).slice(0, 100),
+          '-> textValue:',
+          textValue?.slice(0, 50)
+        );
+        return {
+          text: textValue,
+        };
       case 'output':
         return {
           result: 'noop',
@@ -284,6 +393,10 @@ async function executeWorkflowRun(workflowRunId: string) {
   }
 
   console.log(`[Workflow ${workflowRunId}] Starting execution with ${context.nodes.length} nodes`);
+  console.log(
+    `[Workflow ${workflowRunId}] Node types:`,
+    context.nodes.map(n => n.type)
+  );
   diag.info('execution', `Starting workflow execution`, {
     workflow_run_id: workflowRunId,
     project_id: context.project_id,
@@ -323,15 +436,33 @@ async function executeWorkflowRun(workflowRunId: string) {
       try {
         const output = await executeNode(
           node,
-          inputSnapshot.params as Record<string, unknown>,
+          inputSnapshot as Record<string, unknown>,
           nodeRun.id
         );
 
-        completeNodeRun(nodeRun.id, output);
+        completeNodeRun(nodeRun.id, output, 'completed');
+
+        // Store node output for next node to use as input
+        console.log(
+          `[Workflow ${workflowRunId}] Storing output for node ${nodeId}:`,
+          JSON.stringify(output).slice(0, 200)
+        );
+        (context.resolved_input_snapshot as Record<string, unknown>)[nodeId] = output;
+        console.log(
+          `[Workflow ${workflowRunId}] resolved_input_snapshot now has:`,
+          Object.keys(context.resolved_input_snapshot as object)
+        );
 
         const isGenerativeNode = [
+          'input',
+          'story_input',
+          'prompt_input',
+          'instructions_input',
           'llm_text',
           'llm',
+          'extract_canon',
+          'generate_scenes',
+          'generate_shot_plan',
           'tts',
           'text_to_speech',
           'image',
@@ -342,7 +473,11 @@ async function executeWorkflowRun(workflowRunId: string) {
           'generate_video',
         ].includes(nodeType);
 
-        if (isGenerativeNode && output.result !== 'error') {
+        console.log(
+          `[Workflow ${workflowRunId}] Node ${nodeId} type=${nodeType} isGenerativeNode=${isGenerativeNode} output result=${output?.result} hasText=${!!output?.text}`
+        );
+
+        if (isGenerativeNode && output?.result !== 'error') {
           const asset = createAssetFromNodeOutput({
             project_id: context.project_id,
             workflow_run_id: workflowRunId,
@@ -366,10 +501,14 @@ async function executeWorkflowRun(workflowRunId: string) {
         const message = error instanceof Error ? error.message : 'Node execution failed';
         console.error(`[Workflow ${workflowRunId}] Node ${nodeId} failed: ${message}`);
 
-        completeNodeRun(nodeRun.id, {
-          result: 'error',
-          error: message,
-        });
+        completeNodeRun(
+          nodeRun.id,
+          {
+            result: 'error',
+            error: message,
+          },
+          'failed'
+        );
       }
 
       await delay(100);

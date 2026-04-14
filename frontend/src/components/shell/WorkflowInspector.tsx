@@ -4,12 +4,14 @@ import {
   fetchWorkflowById,
   fetchWorkflowVersions,
   fetchProjectWorkflowRuns,
+  fetchNodeRuns,
   updateWorkflow,
   validateWorkflow,
   createWorkflowVersion,
   type WorkflowDefinition,
   type WorkflowVersion,
   type WorkflowValidation,
+  type NodeRun,
 } from '../../lib/api';
 import {
   getWorkflowNodeDefinition,
@@ -18,36 +20,13 @@ import {
 } from '../../lib/workflowCatalog';
 import { showToast, useAppStore, useSelectionStore } from '../../stores';
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-interface EditableNode {
-  id: string;
-  type: string;
-  catalogType: string;
-  label: string;
-  params: Record<string, unknown>;
-  data: Record<string, unknown>;
-  position: { x: number; y: number };
-}
-
-interface EditableEdge {
-  id: string;
-  source: string;
-  target: string;
-}
-
-interface WorkflowDraft {
-  title: string;
-  description: string;
-  status: WorkflowDefinition['status'];
-  templateType: string;
-  defaultsText: string;
-  metadataText: string;
-  nodes: EditableNode[];
-  edges: EditableEdge[];
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+import {
+  useDraftStore,
+  buildWorkflowPayload,
+  type WorkflowDraftState,
+  type EditableNode,
+  type EditableEdge,
+} from '../../stores/draftStore';
 
 const categoryLabels: Record<WorkflowNodeCategory, string> = {
   input: 'Inputs',
@@ -57,89 +36,6 @@ const categoryLabels: Record<WorkflowNodeCategory, string> = {
   assembly: 'Assembly',
   export: 'Export',
 };
-
-function formatJson(value: unknown): string {
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return '{}';
-  }
-}
-
-function toEditableNode(rawNode: unknown): EditableNode {
-  const node = rawNode as Record<string, unknown>;
-  const data = (node.data as Record<string, unknown>) ?? {};
-  const position = (() => {
-    const p = data.graph_position;
-    if (typeof p === 'object' && p !== null && !Array.isArray(p)) {
-      const r = p as Record<string, unknown>;
-      if (typeof r.x === 'number' && typeof r.y === 'number') {
-        return { x: r.x, y: r.y };
-      }
-    }
-    return { x: 0, y: 0 };
-  })();
-
-  return {
-    id: node.id as string,
-    type: node.type as string,
-    catalogType: (data.catalog_type as string) ?? (node.type as string),
-    label: (data.label as string) ?? (node.id as string),
-    params: (node.params as Record<string, unknown>) ?? {},
-    data,
-    position,
-  };
-}
-
-function toEditableEdge(rawEdge: unknown): EditableEdge {
-  const edge = rawEdge as Record<string, unknown>;
-  return { id: edge.id as string, source: edge.source as string, target: edge.target as string };
-}
-
-function toDraft(workflow: WorkflowDefinition): WorkflowDraft {
-  return {
-    title: workflow.title,
-    description: workflow.description,
-    status: workflow.status,
-    templateType: workflow.template_type,
-    defaultsText: formatJson(workflow.defaults),
-    metadataText: formatJson(workflow.metadata),
-    nodes: Array.isArray(workflow.nodes) ? workflow.nodes.map(toEditableNode) : [],
-    edges: Array.isArray(workflow.edges) ? workflow.edges.map(toEditableEdge) : [],
-  };
-}
-
-function buildPayload(draft: WorkflowDraft) {
-  let defaults: Record<string, unknown> = {};
-  let metadata: Record<string, unknown> = {};
-  try {
-    defaults = JSON.parse(draft.defaultsText) as Record<string, unknown>;
-  } catch {
-    /* keep {} */
-  }
-  try {
-    metadata = JSON.parse(draft.metadataText) as Record<string, unknown>;
-  } catch {
-    /* keep {} */
-  }
-
-  return {
-    title: draft.title,
-    description: draft.description,
-    mode: 'advanced' as const,
-    status: draft.status,
-    template_type: draft.templateType,
-    defaults,
-    metadata,
-    nodes: draft.nodes.map(n => ({
-      id: n.id,
-      type: n.type,
-      params: n.params,
-      data: { ...n.data, label: n.label, catalog_type: n.catalogType, graph_position: n.position },
-    })),
-    edges: draft.edges.map(e => ({ id: e.id, source: e.source, target: e.target })),
-  };
-}
 
 function updateEdgeField(
   edges: EditableEdge[],
@@ -220,12 +116,84 @@ function VersionRow({ version }: { version: WorkflowVersion }) {
 
 function NodeConfigEditor({
   node,
+  latestNodeRun,
+  availableIds = [],
   onChange,
 }: {
   node: EditableNode;
+  latestNodeRun?: NodeRun;
+  availableIds?: string[];
   onChange: (node: EditableNode) => void;
 }) {
   const cls = inputCls();
+
+  if (node.type === 'asset_review') {
+    // Look for 'text' in the output snapshot
+    const runOutput = asString((latestNodeRun?.output_snapshot as any)?.text);
+    const hasExistingEdit = Boolean(asString(node.params.edited_text));
+    const queryClient = useQueryClient();
+
+    return (
+      <div>
+        <div className="flex items-center justify-between mb-1">
+          <div className="flex items-center gap-2">
+            <Label>Review & Edit Content</Label>
+            <button
+              onClick={() => {
+                queryClient.invalidateQueries({ queryKey: ['project-runs'] });
+                queryClient.invalidateQueries({ queryKey: ['node-runs'] });
+                showToast({
+                  type: 'info',
+                  title: 'Refreshing',
+                  message: 'Checking for new run results...',
+                });
+              }}
+              className="rounded border border-[var(--border)] px-2 py-0.5 text-[10px] bg-slate-100 hover:bg-slate-200"
+              title="Refresh results from server"
+            >
+              REFRESH DATA
+            </button>
+            <div className="text-[8px] text-red-500 font-mono leading-none flex flex-col items-end">
+              <span>Local ID: {node.id.slice(0, 8)}...</span>
+              <span>API IDs: {availableIds.map(id => id.slice(0, 8)).join(', ') || 'NONE'}</span>
+            </div>
+          </div>
+          {runOutput && !hasExistingEdit && (
+            <button
+              onClick={() =>
+                onChange({ ...node, params: { ...node.params, edited_text: runOutput } })
+              }
+              className="text-[10px] text-[var(--accent)] font-medium hover:underline"
+            >
+              Populate from Run
+            </button>
+          )}
+        </div>
+        <textarea
+          value={asString(node.params.edited_text) || runOutput}
+          onChange={e =>
+            onChange({ ...node, params: { ...node.params, edited_text: e.target.value } })
+          }
+          rows={10}
+          placeholder={
+            runOutput
+              ? 'Showing output from last run...'
+              : 'Will be populated after the next successful run...'
+          }
+          className={cls}
+        />
+        {latestNodeRun && (
+          <p className="mt-2 text-[10px] text-[var(--text-muted)] flex items-center gap-1">
+            <span className="inline-block w-1.5 h-1.5 rounded-full bg-[var(--success)]" />
+            Connected to run {latestNodeRun.workflow_run_id.slice(0, 8)}
+          </p>
+        )}
+        <p className="mt-2 text-[10px] text-[var(--text-muted)] italic">
+          Manual edits here will override automated outputs for subsequent nodes.
+        </p>
+      </div>
+    );
+  }
 
   if (node.type === 'input') {
     return (
@@ -321,7 +289,7 @@ function NodeConfigEditor({
 export function WorkflowInspector({ workflowId }: { workflowId: string }) {
   const queryClient = useQueryClient();
   const projectId = useAppStore(s => s.currentProjectId);
-  const [draft, setDraft] = useState<WorkflowDraft | null>(null);
+  const { draft, setDraft } = useDraftStore();
   const [freezeNotes, setFreezeNotes] = useState('');
   const [lastValidation, setLastValidation] = useState<WorkflowValidation | null>(null);
   const [activeSection, setActiveSection] = useState<
@@ -355,6 +323,8 @@ export function WorkflowInspector({ workflowId }: { workflowId: string }) {
     enabled: Boolean(workflowId),
   });
 
+  const derivedProjectId = projectId || workflowQuery.data?.project_id;
+
   const versionsQuery = useQuery({
     queryKey: ['workflow-versions', workflowId],
     queryFn: () => fetchWorkflowVersions(workflowId),
@@ -362,26 +332,49 @@ export function WorkflowInspector({ workflowId }: { workflowId: string }) {
   });
 
   const runsQuery = useQuery({
-    queryKey: ['project-runs', projectId],
-    queryFn: () => fetchProjectWorkflowRuns(projectId!),
-    enabled: Boolean(projectId),
+    queryKey: ['project-runs', derivedProjectId],
+    queryFn: () => fetchProjectWorkflowRuns(derivedProjectId as string),
+    enabled: Boolean(derivedProjectId),
   });
 
-  // Sync draft when workflow changes
-  if (workflowQuery.data && !draft) {
-    setDraft(toDraft(workflowQuery.data));
-  }
+  // No local draft hydration needed; it's handled by WorkflowsTab and draftStore
 
-  const versionIds = versionsQuery.data?.map(v => v.id) ?? [];
-  const workflowRuns =
-    runsQuery.data?.filter(r => versionIds.includes(r.workflow_version_id)) ?? [];
+  // Get all runs and sort by date descending to get the latest first
+  const allRuns = [...(runsQuery.data ?? [])].sort(
+    (a, b) => new Date(b.started_at).getTime() - new Date(a.started_at).getTime()
+  );
+  const latestRunId = allRuns[0]?.id;
+
+  console.log(
+    '[Inspector] latestRunId:',
+    latestRunId,
+    'allRuns:',
+    allRuns.length,
+    'versions:',
+    versionsQuery.data?.length
+  );
+
+  const nodeRunsQuery = useQuery({
+    queryKey: ['node-runs', latestRunId],
+    queryFn: () => (latestRunId ? fetchNodeRuns(latestRunId) : Promise.resolve([])),
+    enabled: Boolean(latestRunId),
+  });
+
+  console.log(
+    '[Inspector] nodeRunsQuery.data:',
+    nodeRunsQuery.data?.length,
+    'isLoading:',
+    nodeRunsQuery.isLoading,
+    'data:',
+    nodeRunsQuery.data
+  );
 
   const updateMutation = useMutation({
     mutationFn: updateWorkflow,
     onSuccess: wf => {
       queryClient.invalidateQueries({ queryKey: ['workflow', wf.id] });
-      queryClient.invalidateQueries({ queryKey: ['project-workflows', projectId] });
-      setDraft(toDraft(wf));
+      queryClient.invalidateQueries({ queryKey: ['project-workflows', derivedProjectId] });
+      // We don't need to manually setDraft here because it's handled globally, but we could update to latest if needed.
       showToast({ type: 'success', title: 'Draft saved', message: wf.title });
     },
     onError: err =>
@@ -425,7 +418,13 @@ export function WorkflowInspector({ workflowId }: { workflowId: string }) {
 
   async function handleSave() {
     if (!draft) return;
-    const payload = buildPayload(draft);
+    console.log(
+      'Inspector Save - saving nodes:',
+      draft.nodes?.length,
+      'edges:',
+      draft.edges?.length
+    );
+    const payload = buildWorkflowPayload(draft);
     await updateMutation.mutateAsync({ workflowId, ...payload });
   }
 
@@ -459,7 +458,7 @@ export function WorkflowInspector({ workflowId }: { workflowId: string }) {
   ] as const;
 
   return (
-    <div className="flex flex-col gap-4 text-sm bg-[var(--bg-base)] p-3">
+    <div className="flex flex-col gap-4 text-sm bg-[var(--bg-base)] p-3 overflow-y-auto h-full">
       {/* Header */}
       <div>
         <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-[var(--text-muted)]">
@@ -474,34 +473,9 @@ export function WorkflowInspector({ workflowId }: { workflowId: string }) {
             {draft.nodes.length} nodes · {draft.edges.length} edges
           </span>
           <span className="rounded-full bg-[var(--bg-hover)] px-2.5 py-1 text-[11px] font-semibold text-[var(--text-secondary)]">
-            {versionsQuery.data?.length ?? 0} versions · {workflowRuns.length} runs
+            {versionsQuery.data?.length ?? 0} versions · {allRuns.length} runs
           </span>
         </div>
-      </div>
-
-      {/* Quick actions */}
-      <div className="flex flex-wrap gap-2">
-        <button
-          onClick={() => void handleSave()}
-          disabled={updateMutation.isPending}
-          className="rounded px-3 py-1.5 text-xs font-medium bg-[var(--accent)] text-white transition hover:opacity-90 disabled:opacity-60"
-        >
-          {updateMutation.isPending ? 'Saving…' : 'Save Draft'}
-        </button>
-        <button
-          onClick={() => void handleValidate()}
-          disabled={validateMutation.isPending || updateMutation.isPending}
-          className="rounded border border-[var(--border)] px-3 py-1.5 text-xs font-medium text-[var(--text-secondary)] transition hover:bg-[var(--bg-hover)] disabled:opacity-60"
-        >
-          {validateMutation.isPending ? 'Validating…' : 'Validate'}
-        </button>
-        <button
-          onClick={() => void handleFreeze()}
-          disabled={freezeMutation.isPending || updateMutation.isPending}
-          className="rounded border border-[var(--success)] bg-[var(--success)]/20 px-3 py-1.5 text-xs font-medium text-[var(--success)] transition hover:bg-[var(--success)]/30 disabled:opacity-60"
-        >
-          {freezeMutation.isPending ? 'Freezing…' : 'Freeze'}
-        </button>
       </div>
 
       {/* Section tabs */}
@@ -550,7 +524,7 @@ export function WorkflowInspector({ workflowId }: { workflowId: string }) {
                     value={draft.status}
                     onChange={e =>
                       setDraft(d =>
-                        d ? { ...d, status: e.target.value as WorkflowDraft['status'] } : d
+                        d ? { ...d, status: e.target.value as WorkflowDraftState['status'] } : d
                       )
                     }
                     className={inputCls()}
@@ -638,7 +612,11 @@ export function WorkflowInspector({ workflowId }: { workflowId: string }) {
               <div
                 id={`node-config-${node.id}`}
                 key={node.id}
-                className="rounded-lg border border-[var(--border)] bg-[var(--bg-input)] p-3 space-y-3"
+                className={`rounded-lg border p-3 space-y-3 transition-colors ${
+                  selectedNodeId === node.id
+                    ? 'border-[var(--accent)] bg-[var(--accent)]/5 shadow-sm ring-1 ring-[var(--accent)]/20'
+                    : 'border-[var(--border)] bg-[var(--bg-input)]'
+                }`}
               >
                 <div className="flex items-start justify-between gap-2">
                   <div>
@@ -648,6 +626,9 @@ export function WorkflowInspector({ workflowId }: { workflowId: string }) {
                     <span className="ml-2 text-[10px] text-[var(--text-muted)]">
                       {definition ? categoryLabels[definition.category] : node.type}
                     </span>
+                    <div className="mt-1 text-[9px] text-[var(--text-muted)] font-mono opacity-50">
+                      ID: {node.id} | TYPE: {node.type}
+                    </div>
                   </div>
                   <button
                     onClick={() =>
@@ -728,6 +709,8 @@ export function WorkflowInspector({ workflowId }: { workflowId: string }) {
 
                 <NodeConfigEditor
                   node={node}
+                  latestNodeRun={nodeRunsQuery.data?.find((nr: NodeRun) => nr.node_id === node.id)}
+                  availableIds={nodeRunsQuery.data?.map((nr: NodeRun) => nr.node_id) || []}
                   onChange={nextNode =>
                     setDraft(d =>
                       d ? { ...d, nodes: d.nodes.map((n, i) => (i === index ? nextNode : n)) } : d
@@ -766,14 +749,12 @@ export function WorkflowInspector({ workflowId }: { workflowId: string }) {
                 )
               }
               className="rounded-full border border-[var(--border)] px-2.5 py-1 text-xs font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]"
-            >
-              Add
-            </button>
+            ></button>
           </div>
           {draft.edges.map((edge, index) => (
             <div
               key={edge.id}
-              className="rounded-xl border border-[var(--200 bg-[var(--bg-input)] p-3 space-y-2"
+              className="rounded-xl border border-[var(--border)] bg-[var(--bg-input)] p-3 space-y-2"
             >
               <div className="grid grid-cols-2 gap-2">
                 <div>

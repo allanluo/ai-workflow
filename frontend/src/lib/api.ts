@@ -470,6 +470,23 @@ export async function updateWorkflow(input: {
   return payload.data.workflow;
 }
 
+export async function deleteWorkflow(workflowId: string): Promise<boolean> {
+  const response = await fetch(`${API_BASE_URL}/workflows/${workflowId}`, {
+    method: 'DELETE',
+  });
+
+  if (!response.ok) {
+    throw new Error(`Delete workflow failed with ${response.status}`);
+  }
+
+  const payload = (await response.json()) as {
+    ok: boolean;
+    data: { deleted: boolean };
+  };
+
+  return payload.data.deleted;
+}
+
 export async function validateWorkflow(workflowId: string): Promise<WorkflowValidation> {
   const response = await fetch(`${API_BASE_URL}/workflows/${workflowId}/validate`, {
     method: 'POST',

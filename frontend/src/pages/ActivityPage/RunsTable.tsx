@@ -32,22 +32,26 @@ export function RunsTable({ runs }: RunsTableProps) {
           return (
             <tr
               key={run.id}
-              onClick={() => selectWorkflowRun(run.id)}
+              onClick={e => {
+                e.preventDefault();
+                e.stopPropagation();
+                console.log('Row clicked:', run.id);
+                selectWorkflowRun(run.id);
+              }}
+              onMouseDown={e => e.stopPropagation()}
               className={`cursor-pointer hover:bg-slate-50 ${
                 selectedRunId === run.id ? 'bg-blue-50' : ''
               }`}
             >
               <td className="px-4 py-3">
-                <div className="text-sm font-medium text-slate-700">{run.workflowName}</div>
-                <div className="text-xs text-slate-400">ID: {run.id}</div>
+                <div className="text-sm font-medium text-slate-700">Run {run.id.slice(0, 8)}</div>
+                <div className="text-xs text-slate-400">{run.status}</div>
               </td>
               <td className="px-4 py-3">
                 <span
                   className={`inline-flex items-center gap-1 text-xs px-2 py-1 rounded ${status.color}`}
                 >
-                  <span>{status.icon}</span>
-                  {status.label}
-                  {run.status === 'running' && ` ${run.progress}%`}
+                  {run.progress}%
                 </span>
                 {run.status === 'running' && (
                   <div className="w-20 h-1 bg-slate-200 rounded mt-1">

@@ -2,6 +2,7 @@ import {
   createWorkflowDefinition,
   createWorkflowVersion,
   createWorkflowRun,
+  deleteWorkflowDefinition,
   getNodeRunById,
   getWorkflowDefinitionById,
   getWorkflowRunById,
@@ -127,6 +128,29 @@ export async function registerWorkflowRoutes(app: FastifyInstance) {
     return {
       ok: true,
       data: { workflow },
+      error: null,
+    };
+  });
+
+  app.delete('/workflows/:workflowId', async (request, reply) => {
+    const params = z.object({ workflowId: z.string() }).parse(request.params);
+    const deleted = deleteWorkflowDefinition(params.workflowId);
+
+    if (!deleted) {
+      reply.code(404);
+      return {
+        ok: false,
+        data: null,
+        error: {
+          code: 'not_found',
+          message: `Workflow ${params.workflowId} was not found`,
+        },
+      };
+    }
+
+    return {
+      ok: true,
+      data: { deleted: true },
       error: null,
     };
   });

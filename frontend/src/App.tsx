@@ -1,4 +1,4 @@
-import { Routes, Route, useParams } from 'react-router-dom';
+import { Routes, Route } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Shell } from './components/layout';
 import { HomePage } from './pages/HomePage';
@@ -13,6 +13,7 @@ import { ShotsPage } from './pages/ShotsPage/ShotsPage';
 import { ActivityPage } from './pages/ActivityPage/ActivityPage';
 import { TimelinePage } from './pages/TimelinePage/TimelinePage';
 import { DiffViewer } from './components/diff/DiffViewer';
+import { useProjectSync } from './hooks/useProjectSync';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -50,31 +51,31 @@ export function App() {
 }
 
 function TabWrapper({ Tab }: { Tab: React.ComponentType<{ projectId: string }> }) {
-  const { projectId } = useParams<{ projectId: string }>();
+  const projectId = useProjectSync();
   if (!projectId) return <div className="p-4 text-[var(--text-muted)]">Project not found</div>;
   return <Tab projectId={projectId} />;
 }
 
 function ShotsPageWrapper() {
-  const { projectId } = useParams<{ projectId: string }>();
+  const projectId = useProjectSync();
   if (!projectId) return <div className="p-4 text-[var(--text-muted)]">Project not found</div>;
   return <ShotsPage projectId={projectId} />;
 }
 
 function TimelinePageWrapper() {
-  const { projectId } = useParams<{ projectId: string }>();
+  const projectId = useProjectSync();
   if (!projectId) return <div className="p-4 text-[var(--text-muted)]">Project not found</div>;
   return <TimelinePage projectId={projectId} />;
 }
 
 function ActivityPageWrapper() {
-  const { projectId } = useParams<{ projectId: string }>();
+  const projectId = useProjectSync();
   if (!projectId) return <div className="p-4 text-[var(--text-muted)]">Project not found</div>;
   return <ActivityPage projectId={projectId} />;
 }
 
 function CompareWrapper() {
-  const { projectId } = useParams<{ projectId: string }>();
+  const projectId = useProjectSync();
   if (!projectId) return <div className="p-4 text-[var(--text-muted)]">Project not found</div>;
   return <DiffViewer type="text" assetId={projectId} />;
 }

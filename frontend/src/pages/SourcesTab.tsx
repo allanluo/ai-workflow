@@ -8,7 +8,7 @@ import {
   type Asset,
   type FileRecord,
 } from '../lib/api';
-import { Button, Badge } from '../components/common';
+import { Button, Badge, Modal } from '../components/common';
 
 interface SourcesTabProps {
   projectId: string;
@@ -18,6 +18,8 @@ export function SourcesTab({ projectId }: SourcesTabProps) {
   const queryClient = useQueryClient();
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [selectedFile, setSelectedFile] = useState<FileRecord | null>(null);
+  const [selectedSource, setSelectedSource] = useState<Asset | null>(null);
 
   const filesQuery = useQuery({
     queryKey: ['project-files', projectId],
@@ -127,7 +129,7 @@ export function SourcesTab({ projectId }: SourcesTabProps) {
           ) : filesQuery.data && filesQuery.data.length > 0 ? (
             <div className="space-y-2">
               {filesQuery.data.map(file => (
-                <UploadedFileCard key={file.id} file={file} />
+                <UploadedFileCard key={file.id} file={file} onClick={() => setSelectedFile(file)} />
               ))}
             </div>
           ) : (
@@ -155,7 +157,7 @@ export function SourcesTab({ projectId }: SourcesTabProps) {
           ) : sourcesQuery.data && sourcesQuery.data.length > 0 ? (
             <div className="space-y-2">
               {sourcesQuery.data.map(asset => (
-                <SourceCard key={asset.id} asset={asset} />
+                <SourceCard key={asset.id} asset={asset} onClick={() => setSelectedSource(asset)} />
               ))}
             </div>
           ) : (
@@ -165,23 +167,80 @@ export function SourcesTab({ projectId }: SourcesTabProps) {
           )}
         </section>
       </div>
+
+      {selectedFile && (
+        <Modal isOpen={true} onClose={() => setSelectedFile(null)} title="File Details">
+          <div className="p-4">
+            <div className="space-y-2 text-sm">
+              <div>
+                <span className="text-[var(--text-muted)]">Path:</span> {selectedFile.file_path}
+              </div>
+              <div>
+                <span className="text-[var(--text-muted)]">Type:</span> {selectedFile.mime_type}
+              </div>
+              <div>
+                <span className="text-[var(--text-muted)]">Size:</span>{' '}
+                {formatBytes(selectedFile.size_bytes)}
+              </div>
+              <div>
+                <span className="text-[var(--text-muted)]">Role:</span> {selectedFile.file_role}
+              </div>
+              <div>
+                <span className="text-[var(--text-muted)]">Created:</span>{' '}
+                {new Date(selectedFile.created_at).toLocaleString()}
+              </div>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {selectedSource && (
+        <Modal
+          isOpen={true}
+          onClose={() => setSelectedSource(null)}
+          title={selectedSource.title || 'Source'}
+        >
+          <div className="p-4">
+            <div className="mb-4">
+              <span className="text-sm text-[var(--text-muted)]">Status: </span>
+              <Badge variant={selectedSource.approval_state === 'approved' ? 'approved' : 'draft'}>
+                {selectedSource.approval_state}
+              </Badge>
+            </div>
+            <div className="bg-[var(--bg-hover)] rounded p-4 max-h-96 overflow-auto">
+              <pre className="text-sm text-[var(--text-primary)] whitespace-pre-wrap">
+                {String(
+                  selectedSource.current_version?.content?.text ||
+                    selectedSource.current_approved_version?.content?.text ||
+                    JSON.stringify(selectedSource.current_version?.content || {}, null, 2)
+                )}
+              </pre>
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
 
-function UploadedFileCard({ file }: { file: FileRecord }) {
+function UploadedFileCard({ file, onClick }: { file: FileRecord; onClick: () => void }) {
   const originalName =
-    typeof file.metadata.original_filename === 'string'
+    typeof file.metadata?.original_filename === 'string'
       ? file.metadata.original_filename
       : 'Uploaded file';
   const assetTypeHint =
-    typeof file.metadata.asset_type_hint === 'string' ? file.metadata.asset_type_hint : null;
+    typeof file.metadata?.asset_type_hint === 'string' ? file.metadata.asset_type_hint : null;
 
   return (
-    <div className="card hover:border-[var(--accent)] transition-colors cursor-pointer">
+    <div
+      className="card hover:border-[var(--accent)] transition-colors cursor-pointer"
+      onClick={onClick}
+    >
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0 flex-1">
-          <h4 className="font-medium text-[var(--text-primary)] truncate">{originalName}</h4>
+          <h4 className="font-medium text-[var(--text-primary)] truncate">
+            {originalName || file.file_path}
+          </h4>
           <div className="mt-1 flex flex-wrap gap-3 text-sm text-[var(--text-muted)]">
             <span>{file.mime_type || 'unknown type'}</span>
             <span>{formatBytes(file.size_bytes)}</span>
@@ -197,11 +256,14 @@ function UploadedFileCard({ file }: { file: FileRecord }) {
   );
 }
 
-function SourceCard({ asset }: { asset: Asset }) {
+function SourceCard({ asset, onClick }: { asset: Asset; onClick: () => void }) {
   const approvalVariant = asset.approval_state === 'approved' ? 'approved' : 'draft';
 
   return (
-    <div className="card hover:border-[var(--accent)] transition-colors cursor-pointer">
+    <div
+      className="card hover:border-[var(--accent)] transition-colors cursor-pointer"
+      onClick={onClick}
+    >
       <div className="flex items-start justify-between">
         <div className="flex-1">
           <h3 className="font-medium text-[var(--text-primary)]">

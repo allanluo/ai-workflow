@@ -1,8 +1,15 @@
 import { useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { RunsTable } from './RunsTable';
 import { RunDetailPanel } from './RunDetailPanel';
 import { ExportJobsList } from './ExportJobsList';
 import { useSelectionStore } from '../../stores';
+import {
+  fetchProjectWorkflowRuns,
+  fetchNodeRuns,
+  type WorkflowRun as ApiWorkflowRun,
+  type NodeRun as ApiNodeRun,
+} from '../../lib/api';
 
 interface ActivityPageProps {
   projectId: string;
@@ -24,6 +31,41 @@ interface NodeRun {
   startedAt: string;
   duration: string;
   logs: string[];
+  output?: Record<string, unknown>;
+}
+
+function transformRun(apiRun: ApiWorkflowRun) {
+  return {
+    id: apiRun.id,
+    workflowName: apiRun.workflow_version_id,
+    status: apiRun.status as 'running' | 'completed' | 'failed' | 'cancelled',
+    startedAt: apiRun.started_at,
+    duration: apiRun.ended_at
+      ? `${new Date(apiRun.ended_at).getTime() - new Date(apiRun.started_at).getTime()}ms`
+      : '-',
+    progress: apiRun.summary?.completed_node_count
+      ? Math.round(
+          ((apiRun.summary.completed_node_count as number) /
+            ((apiRun.summary.node_count as number) || 1)) *
+            100
+        )
+      : 0,
+  };
+}
+
+function transformNodeRun(apiNode: ApiNodeRun) {
+  return {
+    id: apiNode.id,
+    nodeName: apiNode.node_id,
+    status: apiNode.status as 'pending' | 'running' | 'completed' | 'failed',
+    startedAt: apiNode.started_at,
+    duration: apiNode.ended_at
+      ? `${new Date(apiNode.ended_at).getTime() - new Date(apiNode.started_at).getTime()}ms`
+      : '-',
+    logs: apiNode.logs || [],
+    output: apiNode.output_snapshot as Record<string, unknown>,
+    _debug: JSON.stringify(apiNode.output_snapshot).slice(0, 100),
+  };
 }
 
 interface ExportJob {
@@ -34,79 +76,48 @@ interface ExportJob {
   createdAt: string;
 }
 
-const mockRuns: WorkflowRun[] = [
-  {
-    id: 'r1',
-    workflowName: 'Image Generation',
-    status: 'completed',
-    startedAt: '2 hours ago',
-    duration: '45s',
-    progress: 100,
-  },
-  {
-    id: 'r2',
-    workflowName: 'Video Pipeline',
-    status: 'running',
-    startedAt: '10 min ago',
-    duration: '-',
-    progress: 65,
-  },
-  {
-    id: 'r3',
-    workflowName: 'Scene Render',
-    status: 'failed',
-    startedAt: 'Yesterday',
-    duration: '2m 30s',
-    progress: 0,
-  },
-  {
-    id: 'r4',
-    workflowName: 'Shot Batch Gen',
-    status: 'completed',
-    startedAt: 'Yesterday',
-    duration: '5m 12s',
-    progress: 100,
-  },
-];
-
-const mockNodeRuns: NodeRun[] = [
-  {
-    id: 'n1',
-    nodeName: 'Load Sources',
-    status: 'completed',
-    startedAt: '10:30:00',
-    duration: '2s',
-    logs: ['Loading sources...', 'Sources loaded: 5 files'],
-  },
-  {
-    id: 'n2',
-    nodeName: 'Generate Image',
-    status: 'running',
-    startedAt: '10:30:02',
-    duration: '-',
-    logs: ['Calling image service...', 'Processing prompt...'],
-  },
-  {
-    id: 'n3',
-    nodeName: 'Apply Styles',
-    status: 'pending',
-    startedAt: '-',
-    duration: '-',
-    logs: [],
-  },
-  { id: 'n4', nodeName: 'Save Output', status: 'pending', startedAt: '-', duration: '-', logs: [] },
-];
-
-const mockExportJobs: ExportJob[] = [
-  { id: 'e1', format: 'MP4 1080p', status: 'completed', progress: 100, createdAt: '1 hour ago' },
-  { id: 'e2', format: 'MOV 4K', status: 'processing', progress: 45, createdAt: '30 min ago' },
-  { id: 'e3', format: 'GIF Loop', status: 'queued', progress: 0, createdAt: '5 min ago' },
-];
-
 export function ActivityPage({ projectId }: ActivityPageProps) {
   const [activeTab, setActiveTab] = useState<'runs' | 'jobs'>('runs');
   const selectedRunId = useSelectionStore(s => s.selectedWorkflowRunId);
-  const selectedRun = mockRuns.find(r => r.id === selectedRunId) || mockRuns[0];
+
+  console.log('ActivityPage projectId:', projectId);
+
+  const {
+    data: apiRuns,
+    isLoading: runsLoading,
+    refetch: refetchRuns,
+  } = useQuery({
+    queryKey: ['project-runs', projectId],
+    queryFn: () => fetchProjectWorkflowRuns(projectId),
+    enabled: !!projectId,
+    refetchInterval: 10000,
+  });
+
+  const runs = apiRuns?.map(transformRun) || [];
+
+  const { data: apiNodeRuns, refetch: refetchNodeRuns } = useQuery({
+    queryKey: ['node-runs', selectedRunId],
+    queryFn: () => {
+      const runId = selectedRunId || runs[0]?.id;
+      return runId ? fetchNodeRuns(runId) : Promise.resolve([]);
+    },
+    enabled: !!(selectedRunId || runs[0]?.id),
+  });
+  const nodeRuns = apiNodeRuns?.map(transformNodeRun) || [];
+
+  // Use first run if no selection
+  const selectedRun = runs.find(r => r.id === selectedRunId) || runs[0];
+
+  // Debug: show data state
+  const showEmpty = !selectedRun || runs.length === 0;
+
+  if (!selectedRun) {
+    return (
+      <div className="flex items-center justify-center h-full text-slate-500">
+        No runs found. Run a workflow first.
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -148,16 +159,16 @@ export function ActivityPage({ projectId }: ActivityPageProps) {
           <>
             {/* Runs Table - 400px */}
             <div className="w-[400px] border-r border-slate-200 overflow-auto">
-              <RunsTable runs={mockRuns} />
+              <RunsTable runs={runs || []} />
             </div>
             {/* Detail Panel */}
             <div className="flex-1 overflow-auto">
-              <RunDetailPanel run={selectedRun} nodeRuns={mockNodeRuns} />
+              <RunDetailPanel run={selectedRun} nodeRuns={nodeRuns || []} />
             </div>
           </>
         ) : (
           <div className="flex-1 overflow-auto p-4">
-            <ExportJobsList jobs={mockExportJobs} />
+            <ExportJobsList jobs={[]} />
           </div>
         )}
       </div>

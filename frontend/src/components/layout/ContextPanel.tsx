@@ -64,7 +64,7 @@ export function ContextPanel() {
   }
 
   return (
-    <aside className="bg-[var(--bg-base)] border-l border-[var(--border-light)] flex flex-col z-20">
+    <aside className="bg-[var(--bg-base)] border-l border-[var(--border-light)] flex flex-col z-20 h-full overflow-hidden">
       {/* Tab Bar */}
       <PanelTabs
         tabs={tabs}

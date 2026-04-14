@@ -209,6 +209,11 @@ export function getWorkflowRunExecutionContext(workflowRunId: string) {
     {}
   );
 
+  console.log(
+    '[DB] getWorkflowRunExecutionContext - nodes:',
+    JSON.stringify(frozenWorkflow.nodes?.slice(0, 5))
+  );
+
   return {
     workflow_run_id: workflowRun.id,
     workflow_version_id: workflowRun.workflowVersionId,
@@ -294,7 +299,11 @@ export function createNodeRun(input: CreateNodeRunInput) {
   return getNodeRunById(nodeRunId);
 }
 
-export function completeNodeRun(nodeRunId: string, outputSnapshot: Record<string, unknown>) {
+export function completeNodeRun(
+  nodeRunId: string,
+  outputSnapshot: Record<string, unknown>,
+  status: NodeRunStatus = 'completed'
+) {
   const nodeRun = getNodeRunRow(nodeRunId);
 
   if (!nodeRun) {
@@ -313,7 +322,7 @@ export function completeNodeRun(nodeRunId: string, outputSnapshot: Record<string
 
   db.update(nodeRuns)
     .set({
-      status: 'completed',
+      status,
       endedAt,
       outputSnapshotJson: JSON.stringify(outputSnapshot),
       logsJson: appendStringLog(
@@ -564,14 +573,29 @@ export function createAssetFromNodeOutput(input: CreateAssetFromNodeOutputInput)
   const timestamp = new Date().toISOString();
   const { project_id, workflow_run_id, node_run_id, node_type, output } = input;
 
-  const assetTypeMap: Record<string, { type: string; category: string }> = {
+  const assetTypeMap: Record<string, { type: string; category: string; autoApprove?: boolean }> = {
+    // Input nodes - creates source asset
+    input: { type: 'source_story', category: 'story', autoApprove: true },
+    story_input: { type: 'source_story', category: 'story', autoApprove: true },
+    prompt_input: { type: 'source_prompt', category: 'story', autoApprove: true },
+    instructions_input: { type: 'source_instructions', category: 'story', autoApprove: true },
+    // LLM nodes - text generation
     llm_text: { type: 'generated_text', category: 'story' },
     llm: { type: 'generated_text', category: 'story' },
+    // Extract canon - creates canon asset
+    extract_canon: { type: 'canon_text', category: 'story', autoApprove: true },
+    // Generate scenes - creates scene asset
+    generate_scenes: { type: 'scene', category: 'story', autoApprove: true },
+    // Generate shot plan - creates shot plan asset
+    generate_shot_plan: { type: 'shot_plan', category: 'story' },
+    // TTS/Audio nodes
     tts: { type: 'narration_audio', category: 'audio' },
     text_to_speech: { type: 'narration_audio', category: 'audio' },
+    // Image nodes
     image: { type: 'generated_image', category: 'visual' },
     image_generation: { type: 'generated_image', category: 'visual' },
     generate_image: { type: 'generated_image', category: 'visual' },
+    // Video nodes
     video: { type: 'generated_video', category: 'visual' },
     video_generation: { type: 'generated_video', category: 'visual' },
     generate_video: { type: 'generated_video', category: 'visual' },
@@ -594,8 +618,9 @@ export function createAssetFromNodeOutput(input: CreateAssetFromNodeOutputInput)
       title: (output.title as string) ?? `${node_type} output`,
       currentVersionNumber: 1,
       currentAssetVersionId: versionId,
+      currentApprovedAssetVersionId: assetInfo.autoApprove ? versionId : null,
       status: 'ready',
-      approvalState: 'unapproved',
+      approvalState: assetInfo.autoApprove ? 'approved' : 'unapproved',
       createdBy: 'workflow',
       createdAt: timestamp,
       updatedAt: timestamp,

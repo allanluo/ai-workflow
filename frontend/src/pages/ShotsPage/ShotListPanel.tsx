@@ -1,16 +1,20 @@
 import { useState } from 'react';
-import { useSelectionStore } from '../../stores';
 import type { Shot } from './ShotsPage';
 
 interface ShotListPanelProps {
   shots: Shot[];
   projectId: string;
+  selectedShotId?: string | null;
+  onSelectShot?: (shotId: string) => void;
 }
 
-export function ShotListPanel({ shots, projectId }: ShotListPanelProps) {
+export function ShotListPanel({
+  shots,
+  projectId,
+  selectedShotId,
+  onSelectShot,
+}: ShotListPanelProps) {
   const [sceneFilter, setSceneFilter] = useState<string>('all');
-  const selectedShotId = useSelectionStore(s => s.selectedShotId);
-  const selectShot = useSelectionStore(s => s.selectShot);
 
   const filteredShots =
     sceneFilter === 'all' ? shots : shots.filter(s => s.sceneId === sceneFilter);
@@ -48,7 +52,7 @@ export function ShotListPanel({ shots, projectId }: ShotListPanelProps) {
         {filteredShots.map(shot => (
           <div
             key={shot.id}
-            onClick={() => selectShot(shot.id)}
+            onClick={() => onSelectShot?.(shot.id)}
             className={`flex items-center gap-3 p-3 cursor-pointer border-b border-comfy-border transition-colors ${
               selectedShotId === shot.id ? 'bg-comfy-highlight' : 'hover:bg-comfy-input-bg'
             }`}

@@ -1,6 +1,7 @@
 import { ReactNode } from 'react';
 import { useParams } from 'react-router-dom';
 import { usePanelStore, useAppStore } from '../../stores';
+import { useEventStream } from '../../hooks/useEventStream';
 import { MenuBar } from './MenuBar';
 import { Sidebar } from './Sidebar';
 import { TopToolbar } from './TopToolbar';
@@ -13,7 +14,8 @@ interface ShellProps {
 
 export function Shell({ children }: ShellProps) {
   const { projectId } = useParams<{ projectId: string }>();
-  const { rightPanelOpen, rightPanelWidth, bottomDockExpanded } = usePanelStore();
+  useEventStream(projectId);
+  const { rightPanelOpen, rightPanelWidth, bottomDockExpanded = false } = usePanelStore();
   const { sidebarCollapsed } = useAppStore();
 
   const sidebarWidth = projectId ? (sidebarCollapsed ? 56 : 240) : sidebarCollapsed ? 56 : 240;
@@ -48,10 +50,11 @@ export function Shell({ children }: ShellProps) {
 
         {/* Right Context Panel */}
         <aside
-          className="fixed right-0 top-12 bottom-0 flex flex-col z-20 transition-all duration-200"
+          className="fixed right-0 top-12 flex flex-col z-20 transition-all duration-200"
           style={{
             width: rightPanelActualWidth,
-            marginTop: 0,
+            top: '3rem',
+            bottom: bottomDockExpanded ? '12rem' : '0rem',
           }}
         >
           <ContextPanel />

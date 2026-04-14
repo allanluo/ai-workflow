@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { createPortal } from 'react-dom';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useMutation } from '@tanstack/react-query';
 import { useAppStore, useEventStore, type PageId } from '../../stores';
-import { fetchProjectWorkflows } from '../../lib/api';
+import { fetchProjectWorkflows, createWorkflow } from '../../lib/api';
+import { createWorkflowDraftFromTemplate } from '../../lib/workflowCatalog';
 
 interface NavItem {
   id: PageId;
@@ -13,6 +14,23 @@ interface NavItem {
 }
 
 const navItems: NavItem[] = [
+  {
+    id: 'workflows',
+    label: 'Workflows',
+    icon: (
+      <svg
+        width="18"
+        height="18"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+      >
+        <circle cx="12" cy="12" r="3" />
+        <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" />
+      </svg>
+    ),
+  },
   {
     id: 'sources',
     label: 'Sources',
@@ -78,23 +96,6 @@ const navItems: NavItem[] = [
       >
         <path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z" />
         <circle cx="12" cy="13" r="4" />
-      </svg>
-    ),
-  },
-  {
-    id: 'workflows',
-    label: 'Workflows',
-    icon: (
-      <svg
-        width="18"
-        height="18"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-      >
-        <circle cx="12" cy="12" r="3" />
-        <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" />
       </svg>
     ),
   },
@@ -178,6 +179,18 @@ function HomeSidebarContent() {
     queryKey: ['project-workflows', projectId],
     queryFn: () => (projectId ? fetchProjectWorkflows(projectId) : Promise.resolve([])),
     enabled: !!projectId,
+  });
+
+  const navigate = useNavigate();
+
+  const createWorkflowMutation = useMutation({
+    mutationFn: createWorkflow,
+    onSuccess: workflow => {
+      workflowsQuery.refetch();
+      setShowWorkflowsModal(false);
+      sessionStorage.setItem('pendingWorkflowId', workflow.id);
+      navigate(`/projects/${projectId}/workflows`);
+    },
   });
 
   return (
@@ -270,21 +283,51 @@ function HomeSidebarContent() {
                 <h2 style={{ fontSize: '18px', fontWeight: 600, color: 'var(--text-primary)' }}>
                   Workflows
                 </h2>
-                <button
-                  onClick={() => setShowWorkflowsModal(false)}
-                  style={{ padding: '4px', borderRadius: '4px' }}
-                >
-                  <svg
-                    width="20"
-                    height="20"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  {projectId && (
+                    <button
+                      onClick={() => {
+                        const template = createWorkflowDraftFromTemplate('storyboard_from_story');
+                        createWorkflowMutation.mutate({
+                          projectId: projectId!,
+                          title: template.title,
+                          description: template.description,
+                          mode: 'advanced',
+                          template_type: template.template_type,
+                          nodes: template.nodes,
+                          edges: template.edges,
+                        });
+                      }}
+                      style={{
+                        padding: '4px 8px',
+                        background: 'var(--accent)',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: '4px',
+                        cursor: 'pointer',
+                        fontSize: '12px',
+                        fontWeight: 500,
+                      }}
+                    >
+                      + Create New
+                    </button>
+                  )}
+                  <button
+                    onClick={() => setShowWorkflowsModal(false)}
+                    style={{ padding: '4px', borderRadius: '4px' }}
                   >
-                    <path d="M18 6L6 18M6 6l12 12" />
-                  </svg>
-                </button>
+                    <svg
+                      width="20"
+                      height="20"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                    >
+                      <path d="M18 6L6 18M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
               </div>
               <div style={{ padding: '16px', maxHeight: '60vh', overflow: 'auto' }}>
                 <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '8px' }}>
@@ -301,9 +344,39 @@ function HomeSidebarContent() {
                 ) : workflowsQuery.isError ? (
                   <p style={{ fontSize: '14px', color: 'var(--error)' }}>Error loading workflows</p>
                 ) : workflowsQuery.data.length === 0 ? (
-                  <p style={{ fontSize: '14px', color: 'var(--text-muted)' }}>
-                    This project has no workflows yet.
-                  </p>
+                  <div style={{ textAlign: 'center', padding: '20px' }}>
+                    <p
+                      style={{ fontSize: '14px', color: 'var(--text-muted)', marginBottom: '16px' }}
+                    >
+                      This project has no workflows yet.
+                    </p>
+                    <button
+                      onClick={() => {
+                        const template = createWorkflowDraftFromTemplate('storyboard_from_story');
+                        createWorkflowMutation.mutate({
+                          projectId,
+                          title: template.title,
+                          description: template.description,
+                          mode: 'advanced',
+                          template_type: template.template_type,
+                          nodes: template.nodes,
+                          edges: template.edges,
+                        });
+                      }}
+                      style={{
+                        padding: '8px 16px',
+                        background: 'var(--accent)',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: '6px',
+                        cursor: 'pointer',
+                        fontSize: '14px',
+                        fontWeight: 500,
+                      }}
+                    >
+                      + Create Workflow
+                    </button>
+                  </div>
                 ) : (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                     {workflowsQuery.data.map(workflow => (
@@ -353,6 +426,7 @@ function HomeSidebarContent() {
 // Project sidebar content
 function ProjectSidebarContent() {
   const { pathname } = useLocation();
+  const navigate = useNavigate();
   const projectId = pathname.match(/\/projects\/([^/]+)/)?.[1];
   const { sidebarCollapsed, toggleSidebar, currentProjectTitle } = useAppStore();
   const unreadCount = useEventStore(s => s.unreadNotificationCount);
@@ -363,6 +437,16 @@ function ProjectSidebarContent() {
     queryKey: ['project-workflows', projectId],
     queryFn: () => (projectId ? fetchProjectWorkflows(projectId) : Promise.resolve([])),
     enabled: !!projectId,
+  });
+
+  const createWorkflowMutation = useMutation({
+    mutationFn: createWorkflow,
+    onSuccess: workflow => {
+      workflowsQuery.refetch();
+      setShowWorkflowsModal(false);
+      sessionStorage.setItem('pendingWorkflowId', workflow.id);
+      navigate(`/projects/${projectId}/workflows`);
+    },
   });
 
   const toggleGroup = (groupId: string) => {
@@ -573,21 +657,49 @@ function ProjectSidebarContent() {
                 <h2 style={{ fontSize: '18px', fontWeight: 600, color: 'var(--text-primary)' }}>
                   Workflows
                 </h2>
-                <button
-                  onClick={() => setShowWorkflowsModal(false)}
-                  style={{ padding: '4px', borderRadius: '4px' }}
-                >
-                  <svg
-                    width="20"
-                    height="20"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <button
+                    onClick={() => {
+                      const template = createWorkflowDraftFromTemplate('storyboard_from_story');
+                      createWorkflowMutation.mutate({
+                        projectId: projectId!,
+                        title: template.title,
+                        description: template.description,
+                        mode: 'advanced',
+                        template_type: template.template_type,
+                        nodes: template.nodes,
+                        edges: template.edges,
+                      });
+                    }}
+                    style={{
+                      padding: '4px 8px',
+                      background: 'var(--accent)',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: '4px',
+                      cursor: 'pointer',
+                      fontSize: '12px',
+                      fontWeight: 500,
+                    }}
                   >
-                    <path d="M18 6L6 18M6 6l12 12" />
-                  </svg>
-                </button>
+                    + Create New
+                  </button>
+                  <button
+                    onClick={() => setShowWorkflowsModal(false)}
+                    style={{ padding: '4px', borderRadius: '4px' }}
+                  >
+                    <svg
+                      width="20"
+                      height="20"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                    >
+                      <path d="M18 6L6 18M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
               </div>
               <div style={{ padding: '16px', maxHeight: '60vh', overflow: 'auto' }}>
                 {workflowsQuery.isLoading || !workflowsQuery.data ? (
@@ -595,7 +707,39 @@ function ProjectSidebarContent() {
                     Loading workflows...
                   </p>
                 ) : workflowsQuery.data.length === 0 ? (
-                  <p style={{ fontSize: '14px', color: 'var(--text-muted)' }}>No workflows yet.</p>
+                  <div style={{ textAlign: 'center', padding: '20px' }}>
+                    <p
+                      style={{ fontSize: '14px', color: 'var(--text-muted)', marginBottom: '16px' }}
+                    >
+                      No workflows yet.
+                    </p>
+                    <button
+                      onClick={() => {
+                        const template = createWorkflowDraftFromTemplate('storyboard_from_story');
+                        createWorkflowMutation.mutate({
+                          projectId: projectId!,
+                          title: template.title,
+                          description: template.description,
+                          mode: 'advanced',
+                          template_type: template.template_type,
+                          nodes: template.nodes,
+                          edges: template.edges,
+                        });
+                      }}
+                      style={{
+                        padding: '8px 16px',
+                        background: 'var(--accent)',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: '6px',
+                        cursor: 'pointer',
+                        fontSize: '14px',
+                        fontWeight: 500,
+                      }}
+                    >
+                      + Create Workflow
+                    </button>
+                  </div>
                 ) : (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                     {workflowsQuery.data.map(workflow => (

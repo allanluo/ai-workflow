@@ -1,7 +1,6 @@
-import { useEffect } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { useAppStore } from '../stores';
+import { useProjectSync } from '../hooks/useProjectSync';
 import {
   fetchProjectById,
   fetchProjectAssets,
@@ -10,8 +9,7 @@ import {
 } from '../lib/api';
 
 export function ProjectDetailPage() {
-  const { projectId } = useParams<{ projectId: string }>();
-  const { setCurrentProject } = useAppStore();
+  const projectId = useProjectSync();
 
   // Fetch project data
   const projectQuery = useQuery({
@@ -41,12 +39,7 @@ export function ProjectDetailPage() {
     enabled: !!projectId,
   });
 
-  // Set current project in store
-  useEffect(() => {
-    if (projectQuery.data) {
-      setCurrentProject(projectId!, projectQuery.data.title);
-    }
-  }, [projectQuery.data, projectId, setCurrentProject]);
+
 
   if (!projectId) {
     return (

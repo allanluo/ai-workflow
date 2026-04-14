@@ -86,14 +86,15 @@ export const workflowNodeCatalog: WorkflowCatalogNodeDefinition[] = [
     runtimeType: 'llm_text',
     category: 'planning',
     title: 'Extract Canon',
-    description: 'Turns source material into reusable canon such as characters, world rules, and style hints.',
+    description:
+      'Turns source material into reusable canon such as characters, world rules, and style hints.',
     defaultLabel: 'Extract Canon',
     inputSummary: 'story_text',
     outputSummary: 'canon_bundle',
     defaultParams: {
       prompt:
         'Extract the most important canon from the source material: characters, locations, tone, world rules, and continuity constraints.',
-      model: 'llama3.2',
+      model: 'gemma3:1b',
     },
   },
   {
@@ -101,14 +102,15 @@ export const workflowNodeCatalog: WorkflowCatalogNodeDefinition[] = [
     runtimeType: 'llm_text',
     category: 'planning',
     title: 'Generate Scenes',
-    description: 'Breaks the source and canon into a scene outline suitable for later shot planning.',
+    description:
+      'Breaks the source and canon into a scene outline suitable for later shot planning.',
     defaultLabel: 'Generate Scenes',
     inputSummary: 'story_text + canon_bundle',
     outputSummary: 'scene_outline',
     defaultParams: {
       prompt:
         'Generate a clear scene outline from the story and canon. Each scene should have purpose, emotional beat, and setting.',
-      model: 'llama3.2',
+      model: 'gemma3:1b',
     },
   },
   {
@@ -123,7 +125,7 @@ export const workflowNodeCatalog: WorkflowCatalogNodeDefinition[] = [
     defaultParams: {
       prompt:
         'Turn the scene outline into a shot plan with framing, angle, motion, and continuity notes for each shot.',
-      model: 'llama3.2',
+      model: 'gemma3:1b',
     },
   },
   {
@@ -184,7 +186,7 @@ export const workflowNodeCatalog: WorkflowCatalogNodeDefinition[] = [
     defaultParams: {
       prompt:
         'Review the current plan for continuity issues, duplicate beats, missing transitions, or style inconsistency.',
-      model: 'llama3.2',
+      model: 'gemma3:1b',
     },
   },
   {
@@ -219,6 +221,20 @@ export const workflowNodeCatalog: WorkflowCatalogNodeDefinition[] = [
     inputSummary: 'timeline_asset',
     outputSummary: 'final_asset',
     defaultParams: {},
+  },
+  {
+    key: 'asset_review',
+    runtimeType: 'asset_review',
+    category: 'planning',
+    title: 'Review & Edit',
+    description:
+      'Displays a text asset for review and allows manual modifications before the next step.',
+    defaultLabel: 'Review Asset',
+    inputSummary: 'any text output',
+    outputSummary: 'edited_text',
+    defaultParams: {
+      edited_text: '',
+    },
   },
 ];
 
@@ -256,7 +272,8 @@ export const workflowTemplateCatalog: WorkflowTemplateDefinition[] = [
   {
     id: 'short_video_from_prompt',
     title: 'Short Video From Prompt',
-    description: 'Starts from a typed prompt, generates a shot plan and clip, then prepares a preview.',
+    description:
+      'Starts from a typed prompt, generates a shot plan and clip, then prepares a preview.',
     templateType: 'short_form_video',
     mode: 'advanced',
     defaults: {
@@ -336,7 +353,7 @@ export function createWorkflowNodeFromCatalog(
     label?: string;
     params?: Record<string, unknown>;
     data?: Record<string, unknown>;
-  },
+  }
 ) {
   const definition = getWorkflowNodeDefinition(nodeKey);
 
@@ -346,7 +363,7 @@ export function createWorkflowNodeFromCatalog(
 
   return {
     id: overrides?.id ?? `${nodeKey}-${Math.random().toString(36).slice(2, 7)}`,
-    type: definition.runtimeType,
+    type: nodeKey,
     params: {
       ...definition.defaultParams,
       ...(overrides?.params ?? {}),
@@ -381,7 +398,7 @@ export function createWorkflowDraftFromTemplate(templateId: string) {
         label: node.label,
         params: node.params,
         data: node.data,
-      }),
+      })
     ),
     edges: template.edges.map(edge => ({ ...edge })),
   };

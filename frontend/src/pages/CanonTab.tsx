@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchProjectAssets, createAsset, type Asset } from '../lib/api';
 import { Button, Badge } from '../components/common';
@@ -8,12 +9,13 @@ interface CanonTabProps {
 
 export function CanonTab({ projectId }: CanonTabProps) {
   const queryClient = useQueryClient();
+  const [selectedAsset, setSelectedAsset] = useState<Asset | null>(null);
 
   const canonQuery = useQuery({
-    queryKey: ['project-assets', projectId, 'approved'],
+    queryKey: ['project-assets', projectId, 'canon'],
     queryFn: () => fetchProjectAssets(projectId),
     enabled: Boolean(projectId),
-    select: assets => assets.filter(a => a.approval_state === 'approved'),
+    select: assets => assets.filter(a => a.asset_type === 'canon_text'),
   });
 
   const createMutation = useMutation({
@@ -57,12 +59,57 @@ export function CanonTab({ projectId }: CanonTabProps) {
       ) : canonQuery.data && canonQuery.data.length > 0 ? (
         <div className="space-y-3">
           {canonQuery.data.map(asset => (
-            <CanonCard key={asset.id} asset={asset} />
+            <div key={asset.id} onClick={() => setSelectedAsset(asset)} className="cursor-pointer">
+              <CanonCard asset={asset} />
+            </div>
           ))}
         </div>
       ) : (
         <div className="card border-dashed text-center py-8 text-[var(--text-muted)]">
           No approved canon yet. Approve source assets to promote them to canon.
+        </div>
+      )}
+
+      {/* Asset Detail Modal */}
+      {selectedAsset && (
+        <div
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+          onClick={() => setSelectedAsset(null)}
+        >
+          <div
+            className="bg-[var(--bg-elevated)] rounded-lg border border-[var(--border)] w-full max-w-2xl max-h-[80vh] overflow-hidden"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between p-4 border-b border-[var(--border)]">
+              <h3 className="text-lg font-semibold text-[var(--text-primary)]">
+                {selectedAsset.title || 'Canon Document'}
+              </h3>
+              <button
+                onClick={() => setSelectedAsset(null)}
+                className="p-1 hover:bg-[var(--bg-hover)] rounded"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M6 18L18 6M6 6l12 12"
+                  />
+                </svg>
+              </button>
+            </div>
+            <div className="p-4 overflow-auto max-h-[60vh]">
+              <pre className="text-sm text-[var(--text-secondary)] whitespace-pre-wrap">
+                {JSON.stringify(
+                  selectedAsset.current_version?.content ||
+                    selectedAsset.current_approved_version?.content ||
+                    {},
+                  null,
+                  2
+                )}
+              </pre>
+            </div>
+          </div>
         </div>
       )}
     </div>

@@ -1,43 +1,9 @@
 import { usePanelStore } from '../../stores';
 import { Badge, Button } from '../common';
 
-interface Run {
-  id: string;
-  name: string;
-  status: 'running' | 'completed' | 'failed';
-  progress: number;
-  startedAt: string;
-}
-
-interface Job {
-  id: string;
-  name: string;
-  status: 'pending' | 'running' | 'completed' | 'failed';
-  type: string;
-}
-
-// Placeholder data - will be replaced with real data from API
-const mockRuns: Run[] = [
-  {
-    id: 'run-1',
-    name: 'Film Workflow v12',
-    status: 'running',
-    progress: 45,
-    startedAt: '10:30 AM',
-  },
-  {
-    id: 'run-2',
-    name: 'Generate Shots',
-    status: 'completed',
-    progress: 100,
-    startedAt: '10:15 AM',
-  },
-];
-
-const mockJobs: Job[] = [
-  { id: 'job-1', name: 'Generate Image', status: 'running', type: 'image' },
-  { id: 'job-2', name: 'TTS Synthesis', status: 'pending', type: 'audio' },
-];
+import { useLocation } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
+import { fetchProjectWorkflowRuns, fetchProjectWorkflows } from '../../lib/api';
 
 const tabs = [
   { id: 'runs', label: 'Runs' },
@@ -47,84 +13,77 @@ const tabs = [
 ];
 
 function RunsTab() {
+  const { pathname } = useLocation();
+  const projectId = pathname.match(/\/projects\/([^\/]+)/)?.[1];
+
+  console.log('ActivityDock projectId:', projectId, 'pathname:', pathname);
+
+  const runsQuery = useQuery({
+    queryKey: ['project-runs', projectId],
+    queryFn: () => (projectId ? fetchProjectWorkflowRuns(projectId) : Promise.resolve([])),
+    enabled: !!projectId,
+    refetchInterval: 5000,
+  });
+
+  const workflowsQuery = useQuery({
+    queryKey: ['project-workflows', projectId],
+    queryFn: () => (projectId ? fetchProjectWorkflows(projectId) : Promise.resolve([])),
+    enabled: !!projectId,
+  });
+
+  const runs = runsQuery.data ?? [];
+  console.log('ActivityDock runs:', runs.length, 'first run:', runs[0]?.id);
+  const workflows = workflowsQuery.data ?? [];
+
+  // Create a quick lookup map from workflow_version_id to workflow title
+  // Since runs only point to versions, we'll just try to match it if we had version data,
+  // but since we only have workflows here, we'll label it by ID if cross-referencing isn't straightforward
+  // Actually, let's just use the Run ID and the started_at, as we lack full version mappings in this simple component.
+
   return (
-    <div className="p-3 space-y-2">
-      {mockRuns.length === 0 ? (
-        <div className="text-center py-8 text-sm text-[var(--text-muted)]">No active runs</div>
+    <div className="p-2 space-y-1">
+      {runs.length === 0 ? (
+        <div className="text-center py-4 text-xs text-[var(--text-muted)]">No active runs</div>
       ) : (
-        mockRuns.map(run => (
+        runs.slice(0, 10).map(run => (
           <div
             key={run.id}
-            className="flex items-center gap-3 p-3 bg-[var(--bg-elevated)] rounded-lg border border-[var(--border-light)]"
+            className="flex items-center gap-2 px-2 py-1.5 bg-[var(--bg-input)] rounded border border-[var(--border)] hover:bg-[var(--bg-hover)] cursor-pointer"
           >
             {/* Status indicator */}
             <div
-              className={`w-2 h-2 rounded-full ${
-                run.status === 'running'
-                  ? 'bg-[var(--accent)] animate-pulse'
-                  : run.status === 'completed'
-                    ? 'bg-[var(--success)]'
-                    : 'bg-[var(--error)]'
+              className={`w-2 h-2 rounded-sm ${
+                run.status === 'running' || run.status === 'pending'
+                  ? 'bg-blue-500 animate-pulse'
+                  : run.status === 'completed' || run.status === 'success' || run.status === 'pass'
+                    ? 'bg-green-500'
+                    : 'bg-red-500'
               }`}
             />
 
             {/* Content */}
             <div className="flex-1 min-w-0">
-              <div className="text-sm font-medium text-[var(--text-primary)] truncate">
-                {run.name}
+              <div className="text-xs font-medium text-[var(--text-primary)] truncate font-mono">
+                {run.id.slice(0, 8)}
               </div>
-              <div className="flex items-center gap-2 mt-1">
-                <div className="flex-1 h-1.5 bg-[var(--border)] rounded-full overflow-hidden">
-                  <div
-                    className={`h-full rounded-full transition-all ${
-                      run.status === 'completed'
-                        ? 'bg-[var(--success)]'
-                        : run.status === 'failed'
-                          ? 'bg-[var(--error)]'
-                          : 'bg-[var(--accent)]'
-                    }`}
-                    style={{ width: `${run.progress}%` }}
-                  />
-                </div>
-                <span className="text-xs text-[var(--text-muted)]">{run.progress}%</span>
+              <div className="flex items-center justify-between">
+                <div className="text-[10px] text-[var(--text-muted)]">{run.status}</div>
+                <a
+                  href={`/projects/${projectId}/activity`}
+                  className="text-[10px] text-[var(--accent)] hover:underline"
+                  onClick={e => e.stopPropagation()}
+                >
+                  View Details
+                </a>
               </div>
-            </div>
-
-            {/* Actions */}
-            <div className="flex items-center gap-1">
-              {run.status === 'running' ? (
-                <button className="p-1.5 text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] rounded">
-                  <svg
-                    width="14"
-                    height="14"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                  >
-                    <rect x="6" y="4" width="4" height="16" />
-                    <rect x="14" y="4" width="4" height="16" />
-                  </svg>
-                </button>
-              ) : (
-                <button className="p-1.5 text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] rounded">
-                  <svg
-                    width="14"
-                    height="14"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                  >
-                    <path d="M1 4v6h6" />
-                    <path d="M23 20v-6h-6" />
-                    <path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15" />
-                  </svg>
-                </button>
-              )}
             </div>
           </div>
         ))
+      )}
+      {runs.length > 10 && (
+        <div className="text-xs text-center text-[var(--text-muted)] py-1">
+          +{runs.length - 10} more
+        </div>
       )}
     </div>
   );
@@ -133,37 +92,7 @@ function RunsTab() {
 function JobsTab() {
   return (
     <div className="p-3 space-y-2">
-      {mockJobs.length === 0 ? (
-        <div className="text-center py-8 text-sm text-[var(--text-muted)]">No active jobs</div>
-      ) : (
-        mockJobs.map(job => (
-          <div
-            key={job.id}
-            className="flex items-center gap-3 p-3 bg-[var(--bg-elevated)] rounded-lg border border-[var(--border-light)]"
-          >
-            <span
-              className={`text-xs ${
-                job.status === 'running'
-                  ? 'text-[var(--accent)]'
-                  : job.status === 'completed'
-                    ? 'text-[var(--success)]'
-                    : job.status === 'failed'
-                      ? 'text-[var(--error)]'
-                      : 'text-[var(--text-muted)]'
-              }`}
-            >
-              {job.status === 'running' && '◐'}
-              {job.status === 'completed' && '✓'}
-              {job.status === 'failed' && '✗'}
-              {job.status === 'pending' && '○'}
-            </span>
-            <div className="flex-1 min-w-0">
-              <div className="text-sm text-[var(--text-primary)] truncate">{job.name}</div>
-              <div className="text-xs text-[var(--text-muted)]">{job.type}</div>
-            </div>
-          </div>
-        ))
-      )}
+      <div className="text-center py-8 text-sm text-[var(--text-muted)]">No active jobs</div>
     </div>
   );
 }
@@ -203,16 +132,16 @@ export function ActivityDock() {
       }`}
     >
       {/* Header / Tab Bar */}
-      <div className="h-12 flex items-center justify-between px-3 border-b border-[var(--border-light)]">
-        <div className="flex items-center gap-1">
+      <div className="h-10 flex items-center justify-between px-2 border-b border-[var(--border)]">
+        <div className="flex items-center gap-0">
           {tabs.map(tab => (
             <button
               key={tab.id}
               onClick={() => setBottomDockTab(tab.id as typeof bottomDockTab)}
-              className={`px-3 py-1.5 text-sm rounded transition-colors ${
+              className={`px-2 py-1 text-xs font-medium rounded ${
                 bottomDockTab === tab.id
-                  ? 'bg-[var(--bg-active)] text-[var(--text-primary)]'
-                  : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
+                  ? 'bg-[var(--accent)] text-white'
+                  : 'text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]'
               }`}
             >
               {tab.label}

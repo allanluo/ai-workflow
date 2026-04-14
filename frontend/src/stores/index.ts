@@ -8,3 +8,9 @@ export {
   type RunProgress,
   showToast,
 } from './eventStore';
+export {
+  useDraftStore,
+  type WorkflowDraftState,
+  type EditableNode,
+  type EditableEdge,
+} from './draftStore';

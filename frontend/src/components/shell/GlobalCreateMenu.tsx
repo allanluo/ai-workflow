@@ -1,4 +1,7 @@
 import { useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { createWorkflow, createWorkflowDraftFromTemplate } from '../../lib/api';
 
 interface CreateOption {
   id: string;
@@ -17,9 +20,32 @@ const createOptions: CreateOption[] = [
 
 export function GlobalCreateMenu() {
   const [isOpen, setIsOpen] = useState(false);
+  const navigate = useNavigate();
+  const { projectId } = useParams<{ projectId: string }>();
+  const queryClient = useQueryClient();
+
+  const createWorkflowMutation = useMutation({
+    mutationFn: createWorkflow,
+    onSuccess: workflow => {
+      queryClient.invalidateQueries({ queryKey: ['project-workflows', projectId] });
+      navigate(`/projects/${projectId}/workflows?select=${workflow.id}`);
+    },
+  });
 
   const handleCreate = (optionId: string) => {
-    console.log('Create:', optionId);
+    if (optionId === 'workflow' && projectId) {
+      const template = createWorkflowDraftFromTemplate('story-to-video');
+      createWorkflowMutation.mutate({
+        projectId,
+        title: template.title,
+        description: template.description,
+        template_type: 'story-to-video',
+        nodes: template.nodes,
+        edges: template.edges,
+      });
+    } else {
+      console.log('Create:', optionId);
+    }
     setIsOpen(false);
   };
 
