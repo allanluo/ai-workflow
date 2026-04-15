@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchProjectAssets, createAsset, type Asset } from '../lib/api';
-import { Button, Badge, Modal } from '../components/common';
+import { Button, Badge } from '../components/common';
+import { SceneEditorPanel } from '../components/SceneEditorPanel';
+import { useSelectionStore } from '../stores/selectionStore';
 
 interface ScenesTabProps {
   projectId: string;
@@ -10,7 +12,7 @@ interface ScenesTabProps {
 export function ScenesTab({ projectId }: ScenesTabProps) {
   const queryClient = useQueryClient();
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
-  const [selectedAsset, setSelectedAsset] = useState<Asset | null>(null);
+  const { selectedAssetId, clearSelection, selectAsset } = useSelectionStore();
 
   const scenesQuery = useQuery({
     queryKey: ['project-assets', projectId, 'scene'],
@@ -89,7 +91,7 @@ export function ScenesTab({ projectId }: ScenesTabProps) {
                 key={asset.id}
                 asset={asset}
                 index={index + 1}
-                onClick={() => setSelectedAsset(asset)}
+                onClick={() => selectAsset(asset.id)}
               />
             ))}
           </div>
@@ -100,7 +102,7 @@ export function ScenesTab({ projectId }: ScenesTabProps) {
                 key={asset.id}
                 asset={asset}
                 index={index + 1}
-                onClick={() => setSelectedAsset(asset)}
+                onClick={() => selectAsset(asset.id)}
               />
             ))}
           </div>
@@ -111,35 +113,8 @@ export function ScenesTab({ projectId }: ScenesTabProps) {
         </div>
       )}
 
-      {selectedAsset && (
-        <Modal
-          isOpen={true}
-          onClose={() => setSelectedAsset(null)}
-          title={selectedAsset.title || 'Scene'}
-        >
-          <div className="p-4">
-            <div className="mb-4">
-              <span className="text-sm text-[var(--text-muted)]">Status: </span>
-              <Badge variant={selectedAsset.approval_state === 'approved' ? 'approved' : 'draft'}>
-                {selectedAsset.approval_state}
-              </Badge>
-            </div>
-            <div className="bg-[var(--bg-hover)] rounded p-4 max-h-96 overflow-auto">
-              <pre className="text-sm text-[var(--text-primary)] whitespace-pre-wrap">
-                {String(
-                  selectedAsset.current_approved_version?.content?.text ||
-                    selectedAsset.current_version?.content?.text ||
-                    JSON.stringify(
-                      selectedAsset.current_version?.content ||
-                        selectedAsset.current_approved_version?.content || { error: 'No content' },
-                      null,
-                      2
-                    )
-                )}
-              </pre>
-            </div>
-          </div>
-        </Modal>
+      {selectedAssetId && (
+        <SceneEditorPanel assetId={selectedAssetId} />
       )}
     </div>
   );
