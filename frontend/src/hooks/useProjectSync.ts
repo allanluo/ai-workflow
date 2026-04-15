@@ -19,6 +19,7 @@ export function useProjectSync() {
     enabled: Boolean(projectId),
   });
 
+
   useEffect(() => {
     if (projectId && projectQuery.data) {
       if (projectId !== currentProjectId || projectQuery.data.title !== useAppStore.getState().currentProjectTitle) {

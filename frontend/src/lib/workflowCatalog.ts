@@ -92,8 +92,33 @@ export const workflowNodeCatalog: WorkflowCatalogNodeDefinition[] = [
     inputSummary: 'story_text',
     outputSummary: 'canon_bundle',
     defaultParams: {
-      prompt:
-        'Extract the most important canon from the source material: characters, locations, tone, world rules, and continuity constraints.',
+      prompt: `Extract canon from the source material. Output ONLY valid JSON (no markdown, no explanation, no text before or after):
+
+{
+  "summary": "2-3 sentence overview of the story",
+  "themes": ["theme1"],
+  "tone": "overall tone",
+  "colorPalette": ["dominant colors"],
+  "worldRules": ["rule"],
+  "characters": [{
+    "name": "name",
+    "role": "protagonist/antagonist/supporting",
+    "description": "brief description",
+    "appearance": {"face": "features", "hair": "style", "clothing": "outfit", "shoes": "footwear", "hat": "headwear", "accessories": "items"},
+    "personality": "key traits",
+    "relationships": [{"to": "other character", "type": "friend/enemy/family"}]
+  }],
+  "locations": [{
+    "name": "name",
+    "description": "visual description",
+    "mood": "atmosphere"
+  }],
+  "equipment": [{
+    "name": "item name",
+    "description": "description",
+    "owner": "character name"
+  }]
+}`,
       model: 'gemma3:1b',
     },
   },

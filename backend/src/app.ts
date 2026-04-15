@@ -9,6 +9,7 @@ import { config } from './config.js';
 import { registerEventRoutes } from './routes/events.js';
 import { registerFileRoutes } from './routes/files.js';
 import { registerHealthRoutes } from './routes/health.js';
+import { registerLLMRoutes } from './routes/llm.js';
 import { registerAssetRoutes } from './routes/assets.js';
 import { registerProjectRoutes } from './routes/projects.js';
 import { registerWorkflowRoutes } from './routes/workflows.js';
@@ -108,6 +109,7 @@ export async function buildApp() {
   await app.register(
     async api => {
       await api.register(registerHealthRoutes);
+      await api.register(registerLLMRoutes);
       await api.register(registerEventRoutes);
       await api.register(registerProjectRoutes);
       await api.register(registerFileRoutes);

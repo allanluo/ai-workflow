@@ -1,5 +1,8 @@
 import { useState, useRef, useEffect } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 import { useSelectionStore, useDraftStore } from '../../stores';
+import { parseIntent, executeSkill } from '../../lib/agent/intentParser';
+import type { SkillName, SkillResult } from '../../lib/agent/types';
 
 interface ChatMessage {
   id: string;
@@ -8,14 +11,14 @@ interface ChatMessage {
 }
 
 const suggestions = [
-  { label: 'Generate shots', action: 'Can you help me generate shots for this?' },
-  { label: 'Create workflow', action: 'How do I create a workflow?' },
-  { label: 'Review assets', action: 'Let us review the selected assets.' },
-  { label: 'Add scene', action: 'I want to add a new scene.' },
-  { label: 'Explain this node', action: 'What does this selected node do?' },
+  { label: 'Create workflow', action: 'Create a workflow for my music video' },
+  { label: 'Add scene', action: 'Add a new scene' },
+  { label: 'Generate shots', action: 'Generate shots for this scene' },
 ];
 
 export function CopilotPanel() {
+  const navigate = useNavigate();
+  const { projectId } = useParams<{ projectId: string }>();
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -37,7 +40,18 @@ export function CopilotPanel() {
   }, [messages]);
 
   const handleSend = async (messageText: string) => {
-    if (!messageText.trim() || isLoading) return;
+    console.log(
+      'handleSend called with:',
+      messageText,
+      'projectId:',
+      projectId,
+      'isLoading:',
+      isLoading
+    );
+    if (!messageText.trim() || isLoading || !projectId) {
+      console.log('Early return - check conditions:', !messageText.trim(), isLoading, !projectId);
+      return;
+    }
 
     const userMessage: ChatMessage = {
       id: Date.now().toString(),
@@ -50,48 +64,62 @@ export function CopilotPanel() {
     setIsLoading(true);
 
     try {
-      let contextStr = '';
-      if (selectedWorkflowId) contextStr += `Workflow ID: ${selectedWorkflowId}\n`;
-      if (activeNode) {
-        contextStr += `Selected Node: ${activeNode.label || activeNode.id} (Type: ${activeNode.type})\n`;
-        contextStr += `Node Params: ${JSON.stringify(activeNode.params)}\n`;
-      } else if (selectedAssetId) {
-        contextStr += `Selected Asset ID: ${selectedAssetId}\n`;
+      console.log('Parsing intent for:', messageText);
+      const intent = parseIntent(messageText);
+      console.log('Parsed intent:', intent);
+
+      if (intent && intent.confidence > 0.5) {
+        const context = {
+          projectId,
+          workflowId: selectedWorkflowId || undefined,
+          assetId: selectedAssetId || undefined,
+          selectedNode: activeNode
+            ? {
+                id: activeNode.id,
+                type: activeNode.type,
+                label: activeNode.label || activeNode.id,
+                params: activeNode.params,
+              }
+            : undefined,
+        };
+
+        const { skillResult, shouldChat } = await executeSkill(
+          intent.skillName as SkillName,
+          context,
+          messageText
+        );
+
+        const result = skillResult as SkillResult | null;
+
+        if (result?.success && result.action) {
+          if (result.action.type === 'navigate') {
+            const payload = result.action.payload as { path: string; workflowId?: string };
+            if (payload.workflowId) {
+              sessionStorage.setItem('pendingWorkflowId', payload.workflowId);
+            }
+            navigate(payload.path);
+          }
+        }
+
+        const aiMessage: ChatMessage = {
+          id: (Date.now() + 1).toString(),
+          role: 'assistant',
+          content: result?.message || 'Done!',
+        };
+        setMessages(prev => [...prev, aiMessage]);
+
+        if (!result?.success || shouldChat) {
+          const response = await callLLM(messageText, userMessage.content);
+          if (response) {
+            setMessages(prev => [...prev, response]);
+          }
+        }
+      } else {
+        const response = await callLLM(messageText, userMessage.content);
+        if (response) {
+          setMessages(prev => [...prev, response]);
+        }
       }
-
-      const systemPrompt =
-        'You are an AI Copilot assisting the user with their AI video and story workflow. Provide brief, helpful answers.';
-      let finalPrompt = systemPrompt + '\n\n';
-      if (contextStr) {
-        finalPrompt += 'Current User Context:\n' + contextStr + '\n\n';
-      }
-
-      const chatHistory = messages
-        .map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`)
-        .join('\n');
-      finalPrompt += 'Chat History:\n' + chatHistory + '\nUser: ' + messageText + '\nAssistant:';
-
-      const response = await fetch('/api/llm/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: 'gemma3:1b',
-          prompt: finalPrompt,
-          stream: false,
-        }),
-      });
-
-      if (!response.ok) throw new Error(`API error: ${response.statusText}`);
-
-      const data = await response.json();
-
-      const aiMessage: ChatMessage = {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        content: data.response || 'No response generated.',
-      };
-
-      setMessages(prev => [...prev, aiMessage]);
     } catch (error) {
       console.error('Copilot error:', error);
       setMessages(prev => [
@@ -105,6 +133,45 @@ export function CopilotPanel() {
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const callLLM = async (messageText: string, _userContent: string) => {
+    let contextStr = '';
+    if (selectedWorkflowId) contextStr += `Workflow ID: ${selectedWorkflowId}\n`;
+    if (activeNode) {
+      contextStr += `Selected Node: ${activeNode.label || activeNode.id} (Type: ${activeNode.type})\n`;
+      contextStr += `Node Params: ${JSON.stringify(activeNode.params)}\n`;
+    } else if (selectedAssetId) {
+      contextStr += `Selected Asset ID: ${selectedAssetId}\n`;
+    }
+
+    const systemPrompt =
+      'You are an AI Copilot assisting the user with their AI video and story workflow. Provide brief, helpful answers. When user asks to create workflows, suggest using the action buttons instead.';
+    let finalPrompt = systemPrompt + '\n\n';
+    if (contextStr) {
+      finalPrompt += 'Current User Context:\n' + contextStr + '\n\n';
+    }
+    finalPrompt += 'User: ' + messageText + '\nAssistant:';
+
+    const response = await fetch('/api/llm/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gemma3:1b',
+        prompt: finalPrompt,
+        stream: false,
+      }),
+    });
+
+    if (!response.ok) throw new Error(`API error: ${response.statusText}`);
+
+    const data = await response.json();
+
+    return {
+      id: (Date.now() + 1).toString(),
+      role: 'assistant' as const,
+      content: data.response || 'No response generated.',
+    };
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -122,7 +189,9 @@ export function CopilotPanel() {
         {messages.length === 0 ? (
           <div className="space-y-3">
             <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-input)] p-3 text-xs text-[var(--text-secondary)]">
-              Hi! I can help you create workflows, generate content, and review your project.
+              Hi! I can help you create workflows, add scenes, generate shots, and answer questions
+              about your project. Try saying "Create a workflow for my music video" or use the
+              buttons below!
               {(selectedWorkflowId || selectedAssetId) && (
                 <div className="mt-2 text-[10px] font-medium text-[var(--accent)]">
                   I can see your selection context and answer questions about it!

@@ -360,6 +360,35 @@ export async function createAsset(input: {
   return payload.data.asset;
 }
 
+export async function updateAsset(
+  assetId: string,
+  updates: {
+    title?: string;
+    content?: Record<string, unknown>;
+    metadata?: Record<string, unknown>;
+    status?: string;
+  }
+) {
+  const response = await fetch(`${API_BASE_URL}/assets/${assetId}`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(updates),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Update asset failed with ${response.status}`);
+  }
+
+  const payload = (await response.json()) as {
+    ok: boolean;
+    data: { asset: Asset };
+  };
+
+  return payload.data.asset;
+}
+
 export async function fetchProjectWorkflows(projectId: string): Promise<WorkflowDefinition[]> {
   const response = await fetch(`${API_BASE_URL}/projects/${projectId}/workflows`);
 
@@ -388,6 +417,65 @@ export async function fetchWorkflowById(workflowId: string): Promise<WorkflowDef
   };
 
   return payload.data.workflow;
+}
+
+export async function fetchNodeRuns(workflowRunId: string): Promise<NodeRun[]> {
+  const response = await fetch(`${API_BASE_URL}/workflow-runs/${workflowRunId}/node-runs`);
+
+  if (!response.ok) {
+    throw new Error(`Node runs request failed with ${response.status}`);
+  }
+
+  const payload = (await response.json()) as {
+    ok: boolean;
+    data: { items: NodeRun[] };
+  };
+
+  return payload.data.items;
+}
+
+export interface ImageGenerationResult {
+  job_id: string;
+  image_url?: string;
+  status: string;
+}
+
+export async function generateCharacterImage(input: {
+  projectId: string;
+  prompt: string;
+  width?: number;
+  height?: number;
+}): Promise<ImageGenerationResult> {
+  const response = await fetch(
+    `${API_BASE_URL}/projects/${input.projectId}/images`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        prompt: input.prompt,
+        width: input.width ?? 1024,
+        height: input.height ?? 1024,
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(`Image generation failed with ${response.status}`);
+  }
+
+  const payload = (await response.json()) as {
+    ok: boolean;
+    data: ImageGenerationResult;
+    error: { message: string } | null;
+  };
+
+  if (!payload.ok) {
+    throw new Error(payload.error?.message ?? 'Image generation failed');
+  }
+
+  return payload.data;
 }
 
 export async function createWorkflow(input: {
@@ -596,19 +684,4 @@ export async function createWorkflowRun(input: {
   };
 
   return payload.data.workflow_run;
-}
-
-export async function fetchNodeRuns(workflowRunId: string): Promise<NodeRun[]> {
-  const response = await fetch(`${API_BASE_URL}/workflow-runs/${workflowRunId}/node-runs`);
-
-  if (!response.ok) {
-    throw new Error(`Node runs request failed with ${response.status}`);
-  }
-
-  const payload = (await response.json()) as {
-    ok: boolean;
-    data: { items: NodeRun[] };
-  };
-
-  return payload.data.items;
 }

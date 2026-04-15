@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { useAppStore, useEventStore, type PageId } from '../../stores';
-import { fetchProjectWorkflows, createWorkflow } from '../../lib/api';
+import { fetchProjectWorkflows, createWorkflow, deleteWorkflow } from '../../lib/api';
 import { createWorkflowDraftFromTemplate } from '../../lib/workflowCatalog';
 
 interface NavItem {
@@ -193,6 +193,11 @@ function HomeSidebarContent() {
     },
   });
 
+  const deleteWorkflowMutation = useMutation({
+    mutationFn: deleteWorkflow,
+    onSuccess: () => workflowsQuery.refetch(),
+  });
+
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center justify-between p-3 border-b border-[var(--border-light)]">
@@ -380,37 +385,75 @@ function HomeSidebarContent() {
                 ) : (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                     {workflowsQuery.data.map(workflow => (
-                      <button
+                      <div
                         key={workflow.id}
-                        onClick={() => {
-                          setShowWorkflowsModal(false);
-                          sessionStorage.setItem('pendingWorkflowId', workflow.id);
-                          window.location.href = `/projects/${projectId}/workflows`;
-                        }}
-                        style={{
-                          width: '100%',
-                          padding: '12px',
-                          textAlign: 'left',
-                          borderRadius: '4px',
-                          border: '1px solid var(--border-light)',
-                          cursor: 'pointer',
-                        }}
+                        style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%' }}
                       >
-                        <div
+                        <button
+                          onClick={() => {
+                            setShowWorkflowsModal(false);
+                            sessionStorage.setItem('pendingWorkflowId', workflow.id);
+                            window.location.href = `/projects/${projectId}/workflows`;
+                          }}
                           style={{
-                            fontSize: '14px',
-                            fontWeight: 500,
-                            color: 'var(--text-primary)',
+                            flex: 1,
+                            padding: '12px',
+                            textAlign: 'left',
+                            borderRadius: '4px',
+                            border: '1px solid var(--border-light)',
+                            background: 'var(--bg-elevated)',
+                            cursor: 'pointer',
                           }}
                         >
-                          {workflow.title}
-                        </div>
-                        <div
-                          style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}
+                          <div
+                            style={{
+                              fontSize: '14px',
+                              fontWeight: 500,
+                              color: 'var(--text-primary)',
+                            }}
+                          >
+                            {workflow.title}
+                          </div>
+                          <div
+                            style={{
+                              fontSize: '12px',
+                              color: 'var(--text-muted)',
+                              marginTop: '4px',
+                            }}
+                          >
+                            {workflow.nodes?.length || 0} nodes • {workflow.mode}
+                          </div>
+                        </button>
+                        <button
+                          onClick={() => {
+                            if (confirm(`Delete "${workflow.title}"?`)) {
+                              deleteWorkflowMutation.mutate(workflow.id);
+                            }
+                          }}
+                          disabled={deleteWorkflowMutation.isPending}
+                          title="Delete workflow"
+                          style={{
+                            padding: '8px',
+                            background: 'transparent',
+                            border: 'none',
+                            borderRadius: '4px',
+                            cursor: deleteWorkflowMutation.isPending ? 'not-allowed' : 'pointer',
+                            color: 'var(--text-muted)',
+                            opacity: deleteWorkflowMutation.isPending ? 0.5 : 1,
+                          }}
                         >
-                          {workflow.nodes?.length || 0} nodes • {workflow.mode}
-                        </div>
-                      </button>
+                          <svg
+                            width="16"
+                            height="16"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                          >
+                            <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
+                          </svg>
+                        </button>
+                      </div>
                     ))}
                   </div>
                 )}
@@ -447,6 +490,11 @@ function ProjectSidebarContent() {
       sessionStorage.setItem('pendingWorkflowId', workflow.id);
       navigate(`/projects/${projectId}/workflows`);
     },
+  });
+
+  const deleteWorkflowMutation = useMutation({
+    mutationFn: deleteWorkflow,
+    onSuccess: () => workflowsQuery.refetch(),
   });
 
   const toggleGroup = (groupId: string) => {
@@ -743,37 +791,75 @@ function ProjectSidebarContent() {
                 ) : (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                     {workflowsQuery.data.map(workflow => (
-                      <button
+                      <div
                         key={workflow.id}
-                        onClick={() => {
-                          setShowWorkflowsModal(false);
-                          sessionStorage.setItem('pendingWorkflowId', workflow.id);
-                          window.location.href = `/projects/${projectId}/workflows`;
-                        }}
-                        style={{
-                          width: '100%',
-                          padding: '12px',
-                          textAlign: 'left',
-                          borderRadius: '4px',
-                          border: '1px solid var(--border-light)',
-                          cursor: 'pointer',
-                        }}
+                        style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%' }}
                       >
-                        <div
+                        <button
+                          onClick={() => {
+                            setShowWorkflowsModal(false);
+                            sessionStorage.setItem('pendingWorkflowId', workflow.id);
+                            window.location.href = `/projects/${projectId}/workflows`;
+                          }}
                           style={{
-                            fontSize: '14px',
-                            fontWeight: 500,
-                            color: 'var(--text-primary)',
+                            flex: 1,
+                            padding: '12px',
+                            textAlign: 'left',
+                            borderRadius: '4px',
+                            border: '1px solid var(--border-light)',
+                            background: 'var(--bg-elevated)',
+                            cursor: 'pointer',
                           }}
                         >
-                          {workflow.title}
-                        </div>
-                        <div
-                          style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}
+                          <div
+                            style={{
+                              fontSize: '14px',
+                              fontWeight: 500,
+                              color: 'var(--text-primary)',
+                            }}
+                          >
+                            {workflow.title}
+                          </div>
+                          <div
+                            style={{
+                              fontSize: '12px',
+                              color: 'var(--text-muted)',
+                              marginTop: '4px',
+                            }}
+                          >
+                            {workflow.nodes?.length || 0} nodes • {workflow.mode}
+                          </div>
+                        </button>
+                        <button
+                          onClick={() => {
+                            if (confirm(`Delete "${workflow.title}"?`)) {
+                              deleteWorkflowMutation.mutate(workflow.id);
+                            }
+                          }}
+                          disabled={deleteWorkflowMutation.isPending}
+                          title="Delete workflow"
+                          style={{
+                            padding: '8px',
+                            background: 'transparent',
+                            border: 'none',
+                            borderRadius: '4px',
+                            cursor: deleteWorkflowMutation.isPending ? 'not-allowed' : 'pointer',
+                            color: 'var(--text-muted)',
+                            opacity: deleteWorkflowMutation.isPending ? 0.5 : 1,
+                          }}
                         >
-                          {workflow.nodes?.length || 0} nodes • {workflow.mode}
-                        </div>
-                      </button>
+                          <svg
+                            width="16"
+                            height="16"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                          >
+                            <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
+                          </svg>
+                        </button>
+                      </div>
                     ))}
                   </div>
                 )}

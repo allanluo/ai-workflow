@@ -563,6 +563,7 @@ export function recoverStaleWorkflowRun(runId: string, reason: string) {
 
 interface CreateAssetFromNodeOutputInput {
   project_id: string;
+  workflow_version_id: string;
   workflow_run_id: string;
   node_run_id: string;
   node_type: string;
@@ -571,7 +572,8 @@ interface CreateAssetFromNodeOutputInput {
 
 export function createAssetFromNodeOutput(input: CreateAssetFromNodeOutputInput) {
   const timestamp = new Date().toISOString();
-  const { project_id, workflow_run_id, node_run_id, node_type, output } = input;
+  const { project_id, workflow_version_id, workflow_run_id, node_run_id, node_type, output } =
+    input;
 
   const assetTypeMap: Record<string, { type: string; category: string; autoApprove?: boolean }> = {
     // Input nodes - creates source asset
@@ -638,6 +640,7 @@ export function createAssetFromNodeOutput(input: CreateAssetFromNodeOutputInput)
       status: 'ready',
       approvalState: 'unapproved',
       sourceMode: 'workflow',
+      workflowVersionId: workflow_version_id,
       workflowRunId: workflow_run_id,
       nodeRunId: node_run_id,
       contentJson: JSON.stringify(output),

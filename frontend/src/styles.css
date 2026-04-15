@@ -938,3 +938,81 @@ body {
   background: rgba(0, 0, 0, 0.5);
   z-index: 50;
 }
+
+/* ============================================
+   ComfyUI Additional Utilities
+   ============================================ */
+
+.comfy-bg-primary {
+  background: var(--bg-base);
+}
+
+.comfy-input-bg {
+  background: var(--bg-input);
+}
+
+.comfy-highlight {
+  background: var(--bg-hover);
+}
+
+.comfy-selection-bg {
+  background: var(--bg-active);
+}
+
+.comfy-border {
+  border-color: var(--border);
+}
+
+.comfy-text {
+  color: var(--text-primary);
+}
+
+.comfy-muted {
+  color: var(--text-muted);
+}
+
+.comfy-accent {
+  color: var(--accent);
+  background: var(--accent);
+}
+
+.comfy-btn {
+  padding: 6px 12px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.comfy-btn:hover {
+  background: var(--accent-hover);
+}
+
+.comfy-btn-secondary {
+  padding: 6px 12px;
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.comfy-btn-secondary:hover {
+  background: var(--bg-active);
+}
+
+.comfy-input {
+  padding: 6px 10px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.comfy-input:focus {
+  border-color: var(--accent);
+}

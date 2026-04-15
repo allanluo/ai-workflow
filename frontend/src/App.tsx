@@ -52,7 +52,16 @@ export function App() {
 
 function TabWrapper({ Tab }: { Tab: React.ComponentType<{ projectId: string }> }) {
   const projectId = useProjectSync();
-  if (!projectId) return <div className="p-4 text-[var(--text-muted)]">Project not found</div>;
+  if (!projectId) {
+    return (
+      <div className="h-full w-full flex items-center justify-center bg-[var(--bg-base)]">
+        <div className="text-center">
+          <p className="text-2xl text-red-500 font-bold mb-2">❌ Project Not Found</p>
+          <p className="text-sm text-red-400">useProjectSync returned: {String(projectId)}</p>
+        </div>
+      </div>
+    );
+  }
   return <Tab projectId={projectId} />;
 }
 

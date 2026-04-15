@@ -31,7 +31,10 @@ interface WorkflowNode {
 }
 
 function getNodeType(node: WorkflowNode): string {
-  return typeof node.type === 'string' ? node.type : 'unknown';
+  const nodeAny = node as Record<string, unknown>;
+  if (typeof nodeAny.nodeKey === 'string') return nodeAny.nodeKey;
+  if (typeof nodeAny.type === 'string') return nodeAny.type;
+  return 'unknown';
 }
 
 function getNodeId(node: WorkflowNode, position: number): string {
@@ -125,8 +128,38 @@ async function executeLLMNode(
     getRetryPolicyForNode('llm')
   );
 
+  const rawText = response.response;
+
+  // Try to parse as JSON if the prompt asks for JSON output
+  if (baseInstructions.toLowerCase().includes('json')) {
+    try {
+      // Try direct JSON parse first
+      const parsed = JSON.parse(rawText);
+      return { ...parsed, _raw: rawText };
+    } catch {
+      // Try to extract JSON from markdown code blocks
+      const jsonMatch = rawText.match(/```(?:json)?\s*([\s\S]*?)```/);
+      if (jsonMatch) {
+        try {
+          const parsed = JSON.parse(jsonMatch[1].trim());
+          return { ...parsed, _raw: rawText };
+        } catch {}
+      }
+      // Try to extract JSON from plain text using regex
+      const plainMatch = rawText.match(/\{[\s\S]*\}/);
+      if (plainMatch) {
+        try {
+          const parsed = JSON.parse(plainMatch[0]);
+          return { ...parsed, _raw: rawText };
+        } catch {}
+      }
+      // If all JSON parsing fails, return as text
+      console.warn('[LLM] JSON parse failed, returning raw text');
+    }
+  }
+
   return {
-    text: response.response,
+    text: rawText,
     model: response.model,
   };
 }
@@ -480,6 +513,7 @@ async function executeWorkflowRun(workflowRunId: string) {
         if (isGenerativeNode && output?.result !== 'error') {
           const asset = createAssetFromNodeOutput({
             project_id: context.project_id,
+            workflow_version_id: context.workflow_version_id,
             workflow_run_id: workflowRunId,
             node_run_id: nodeRun.id,
             node_type: nodeType,

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import type { Shot } from './ShotsPage';
 
 interface ShotEditorProps {
@@ -17,6 +17,16 @@ export function ShotEditor({ shot }: ShotEditorProps) {
   const [motion, setMotion] = useState(shot.motion);
   const [duration, setDuration] = useState(shot.duration);
   const [isDirty, setIsDirty] = useState(false);
+
+  useEffect(() => {
+    setPrompt(shot.prompt);
+    setNegativePrompt(shot.negativePrompt);
+    setShotType(shot.shotType);
+    setAngle(shot.angle);
+    setMotion(shot.motion);
+    setDuration(shot.duration);
+    setIsDirty(false);
+  }, [shot.id]);
 
   const handleSaveDraft = () => {
     console.log('Save draft');

@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { createWorkflow, createWorkflowDraftFromTemplate } from '../../lib/api';
+import { createWorkflow } from '../../lib/api';
+import { createWorkflowDraftFromTemplate } from '../../lib/workflowCatalog';
 
 interface CreateOption {
   id: string;
@@ -39,7 +40,8 @@ export function GlobalCreateMenu() {
         projectId,
         title: template.title,
         description: template.description,
-        template_type: 'story-to-video',
+        mode: 'advanced',
+        template_type: template.template_type,
         nodes: template.nodes,
         edges: template.edges,
       });
