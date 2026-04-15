@@ -133,8 +133,17 @@ export const workflowNodeCatalog: WorkflowCatalogNodeDefinition[] = [
     inputSummary: 'story_text + canon_bundle',
     outputSummary: 'scene_outline',
     defaultParams: {
-      prompt:
-        'Generate a clear scene outline from the story and canon. Each scene should have purpose, emotional beat, and setting.',
+      prompt: `Generate a clear scene outline from the story and canon. Output ONLY valid JSON (no markdown, no explanation, no text before or after). The JSON should conform to the following schema:
+{
+  "scenes": [
+    {
+      "title": "Scene title",
+      "purpose": "Why this scene exists in the narrative",
+      "emotionalBeat": "The primary emotion or emotional shift",
+      "setting": "Detailed description of the location and time"
+    }
+  ]
+}`,
       model: 'gemma3:1b',
     },
   },
@@ -148,8 +157,19 @@ export const workflowNodeCatalog: WorkflowCatalogNodeDefinition[] = [
     inputSummary: 'scene_outline',
     outputSummary: 'shot_plan',
     defaultParams: {
-      prompt:
-        'Turn the scene outline into a shot plan with framing, angle, motion, and continuity notes for each shot.',
+      prompt: `Turn the scene outline into a shot plan with framing, angle, motion, and continuity notes for each shot. Output ONLY valid JSON (no markdown, no explanation, no text before or after). The JSON should conform to the following schema:
+{
+  "shots": [
+    {
+      "shotNumber": "1",
+      "description": "Brief description of the shot",
+      "framing": "e.g., Wide, Medium, Close-up",
+      "angle": "e.g., Eye-level, High, Low",
+      "motion": "e.g., Pan, Tilt, Dolly, Static",
+      "continuityNotes": "Notes for seamless transitions"
+    }
+  ]
+}`,
       model: 'gemma3:1b',
     },
   },
@@ -163,7 +183,10 @@ export const workflowNodeCatalog: WorkflowCatalogNodeDefinition[] = [
     inputSummary: 'prompt_text or shot_plan',
     outputSummary: 'image_asset',
     defaultParams: {
-      prompt: 'Generate a cinematic storyboard frame for the selected shot.',
+      prompt: `Generate a cinematic storyboard frame for the selected shot. Output ONLY valid JSON (no markdown, no explanation, no text before or after). The JSON should conform to the following schema:
+{
+  "image_description": "A detailed description of the image to be generated, including style, subject, and composition."
+}`,
       width: 1024,
       height: 1024,
     },
@@ -178,7 +201,10 @@ export const workflowNodeCatalog: WorkflowCatalogNodeDefinition[] = [
     inputSummary: 'prompt_text, shot_plan, or image reference',
     outputSummary: 'video_clip_asset',
     defaultParams: {
-      prompt: 'Generate a short cinematic clip that matches the selected shot and style.',
+      prompt: `Generate a short cinematic clip that matches the selected shot and style. Output ONLY valid JSON (no markdown, no explanation, no text before or after). The JSON should conform to the following schema:
+{
+  "video_description": "A detailed description of the video clip to be generated, including scene, action, characters, and style."
+}`,
       width: 1024,
       height: 576,
     },
@@ -193,7 +219,10 @@ export const workflowNodeCatalog: WorkflowCatalogNodeDefinition[] = [
     inputSummary: 'narration_text',
     outputSummary: 'voice_asset',
     defaultParams: {
-      text: 'Narration text goes here.',
+      text: `Generate narration text based on the provided input. Output ONLY valid JSON (no markdown, no explanation, no text before or after). The JSON should conform to the following schema:
+{
+  "narration": "The generated narration text."
+}`,
       template: 'alloy',
       speed: 1,
       volume: 1,
@@ -343,7 +372,10 @@ export const workflowTemplateCatalog: WorkflowTemplateDefinition[] = [
         id: 'generate-narration',
         nodeKey: 'generate_narration',
         params: {
-          text: 'Narration text goes here.',
+          text: `Generate narration text based on the provided input. Output ONLY valid JSON (no markdown, no explanation, no text before or after). The JSON should conform to the following schema:
+{
+  "narration": "The generated narration text."
+}`,
           template: 'alloy',
           speed: 1,
           volume: 1,
