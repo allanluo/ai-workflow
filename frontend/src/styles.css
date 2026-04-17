@@ -1004,6 +1004,52 @@ body {
   background: var(--bg-active);
 }
 
+.comfy-btn-danger {
+  padding: 6px 12px;
+  background: var(--error);
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.comfy-btn-danger:hover {
+  background: #ef5555;
+}
+
+.comfy-segment {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-input);
+}
+
+.comfy-segment-btn {
+  padding: 6px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.comfy-segment-btn:hover {
+  background: var(--bg-hover);
+}
+
+.comfy-segment-btn-active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.comfy-segment-btn-active:hover {
+  background: var(--accent-hover);
+}
+
 .comfy-input {
   padding: 6px 10px;
   background: var(--bg-input);

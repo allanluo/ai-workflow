@@ -661,3 +661,20 @@ Tasks and execution state are persisted to database for:
 - [ ] MCP integration
 - [ ] Agent Mode
 - [ ] Feedback loop learning
+
+---
+
+## First Concrete Copilot Use Case (MVP): Shot Image Prompt Copilot
+
+To start with a bounded, high-signal feature, the first copilot capability should focus on **improving shot image prompts** (per shot, per scene, within a shot plan).
+
+Why this first:
+
+- Clear success criteria (the generated image matches the intended shot)
+- Minimal destructive actions (mostly “write a prompt, save a version”)
+- Uses existing context sources (canon, scenes, shot plan)
+- Fits naturally in the existing Shots UI (selection + preview + generation)
+
+Design details and proposed data model live in:
+
+- `docs/copilot_shot_prompt_design.md`

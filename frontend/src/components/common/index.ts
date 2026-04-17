@@ -6,3 +6,4 @@ export { Tabs, Tab, TabPanel, VerticalTabs, PanelTabs } from './Tabs';
 export { Modal, ConfirmDialog, Dialog } from './Modal';
 export { Dropdown, ContextMenu, SimpleMenu } from './Dropdown';
 export { ProjectPickerModal } from './ProjectPickerModal';
+export { Label } from './Label';

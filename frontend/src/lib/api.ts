@@ -389,6 +389,52 @@ export async function updateAsset(
   return payload.data.asset;
 }
 
+export async function fetchAsset(assetId: string): Promise<Asset> {
+  const response = await fetch(`${API_BASE_URL}/assets/${assetId}`);
+
+  if (!response.ok) {
+    throw new Error(`Asset request failed with ${response.status}`);
+  }
+
+  const payload = (await response.json()) as {
+    ok: boolean;
+    data: { asset: Asset };
+  };
+
+  return payload.data.asset;
+}
+
+export async function createAssetVersion(
+  assetId: string,
+  input: {
+    content?: Record<string, unknown>;
+    metadata?: Record<string, unknown>;
+    status?: 'draft' | 'needs_revision' | 'ready' | 'locked' | 'deprecated' | 'failed';
+    source_mode?: 'manual' | 'copilot' | 'workflow' | 'import' | 'system';
+    locked_fields?: string[];
+    make_current?: boolean;
+  }
+): Promise<AssetVersion> {
+  const response = await fetch(`${API_BASE_URL}/assets/${assetId}/versions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(input),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Create asset version failed with ${response.status}`);
+  }
+
+  const payload = (await response.json()) as {
+    ok: boolean;
+    data: { asset_version: AssetVersion };
+  };
+
+  return payload.data.asset_version;
+}
+
 export async function fetchProjectWorkflows(projectId: string): Promise<WorkflowDefinition[]> {
   const response = await fetch(`${API_BASE_URL}/projects/${projectId}/workflows`);
 
@@ -440,6 +486,39 @@ export interface ImageGenerationResult {
   status: string;
 }
 
+export interface VideoGenerationResult {
+  job_id: string;
+  prompt_id?: string;
+  video_path?: string;
+  video_url?: string;
+  status: string;
+}
+
+export interface VoiceOverGenerationResult {
+  job_id: string;
+  status: string;
+  audio_url?: string;
+  audio_path?: string;
+  provider?: string;
+}
+
+export interface SoundEffectGenerationResult {
+  job_id: string;
+  status: string;
+  prompt_id?: string;
+  audio_url?: string;
+  audio_path?: string;
+}
+
+export interface JobStatus {
+  job_id: string;
+  type: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  artifacts?: Record<string, unknown>;
+}
+
 export async function generateCharacterImage(input: {
   projectId: string;
   prompt: string;
@@ -476,6 +555,188 @@ export async function generateCharacterImage(input: {
   }
 
   return payload.data;
+}
+
+export async function generateProjectVideo(input: {
+  projectId: string;
+  prompt: string;
+  workflow?: string;
+  width?: number;
+  height?: number;
+}): Promise<VideoGenerationResult> {
+  const response = await fetch(`${API_BASE_URL}/projects/${input.projectId}/videos`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      prompt: input.prompt,
+      workflow: input.workflow,
+      width: input.width ?? 1024,
+      height: input.height ?? 576,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Video generation failed with ${response.status}`);
+  }
+
+  const payload = (await response.json()) as {
+    ok: boolean;
+    data: VideoGenerationResult;
+    error: { message: string } | null;
+  };
+
+  if (!payload.ok) {
+    throw new Error(payload.error?.message ?? 'Video generation failed');
+  }
+
+  return payload.data;
+}
+
+export async function generateVideoFromImage(input: {
+  projectId: string;
+  prompt: string;
+  workflow?: string;
+  width?: number;
+  height?: number;
+  length?: number;
+  reference_image_url: string;
+}): Promise<VideoGenerationResult> {
+  const response = await fetch(`${API_BASE_URL}/projects/${input.projectId}/videos/from-image`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      prompt: input.prompt,
+      workflow: input.workflow,
+      width: input.width,
+      height: input.height,
+      length: input.length,
+      reference_image_url: input.reference_image_url,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Video generation failed with ${response.status}`);
+  }
+
+  const payload = (await response.json()) as {
+    ok: boolean;
+    data: VideoGenerationResult;
+    error: { message: string } | null;
+  };
+
+  if (!payload.ok) {
+    throw new Error(payload.error?.message ?? 'Video generation failed');
+  }
+
+  return payload.data;
+}
+
+export async function generateVoiceOver(input: {
+  projectId: string;
+  text: string;
+  template?: string;
+  provider?: 'piper' | 'cosyvoice';
+  speed?: number;
+  volume?: number;
+  prompt_text?: string;
+  prompt_wav?: string;
+  model_dir?: string;
+}): Promise<VoiceOverGenerationResult> {
+  const response = await fetch(`${API_BASE_URL}/projects/${input.projectId}/voiceovers`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      text: input.text,
+      template: input.template,
+      provider: input.provider,
+      speed: input.speed,
+      volume: input.volume,
+      prompt_text: input.prompt_text,
+      prompt_wav: input.prompt_wav,
+      model_dir: input.model_dir,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Voice-over generation failed with ${response.status}`);
+  }
+
+  const payload = (await response.json()) as {
+    ok: boolean;
+    data: VoiceOverGenerationResult;
+    error: { message: string } | null;
+  };
+
+  if (!payload.ok) {
+    throw new Error(payload.error?.message ?? 'Voice-over generation failed');
+  }
+
+  return payload.data;
+}
+
+export async function generateSoundEffect(input: {
+  projectId: string;
+  prompt: string;
+  workflow?: string;
+  duration_seconds?: number;
+  batch_size?: number;
+  negative_prompt?: string;
+}): Promise<SoundEffectGenerationResult> {
+  const response = await fetch(`${API_BASE_URL}/projects/${input.projectId}/sounds`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      prompt: input.prompt,
+      workflow: input.workflow,
+      duration_seconds: input.duration_seconds,
+      batch_size: input.batch_size,
+      negative_prompt: input.negative_prompt,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Sound generation failed with ${response.status}`);
+  }
+
+  const payload = (await response.json()) as {
+    ok: boolean;
+    data: SoundEffectGenerationResult;
+    error: { message: string } | null;
+  };
+
+  if (!payload.ok) {
+    throw new Error(payload.error?.message ?? 'Sound generation failed');
+  }
+
+  return payload.data;
+}
+
+export async function fetchJobStatus(jobId: string): Promise<JobStatus> {
+  const response = await fetch(`${API_BASE_URL}/jobs/${jobId}`);
+
+  if (!response.ok) {
+    throw new Error(`Job status request failed with ${response.status}`);
+  }
+
+  const payload = (await response.json()) as {
+    ok: boolean;
+    data: { job: JobStatus };
+    error: { message: string } | null;
+  };
+
+  if (!payload.ok) {
+    throw new Error(payload.error?.message ?? 'Job status request failed');
+  }
+
+  return payload.data.job;
 }
 
 export async function createWorkflow(input: {

@@ -49,7 +49,16 @@ export function useEventStream(projectId: string | undefined) {
           // Invalidate relevant queries to fetch fresh data
           queryClient.invalidateQueries({ queryKey: ['project-runs', projectId] });
           queryClient.invalidateQueries({ queryKey: ['node-runs', workflow_run_id] });
+          queryClient.invalidateQueries({ queryKey: ['project-assets', projectId] });
           console.log(`[EventStream] Workflow ${workflow_run_id} ${status}, invalidated queries.`);
+        }
+
+        // Asset-related events should refresh assets lists (scenes, shots, canon, etc.)
+        if (
+          typeof eventData.event_type === 'string' &&
+          (eventData.event_type.startsWith('asset_') || eventData.event_type === 'asset_created_from_workflow')
+        ) {
+          queryClient.invalidateQueries({ queryKey: ['project-assets', projectId] });
         }
       } catch (err) {
         console.error('[EventStream] Error parsing event data:', err);

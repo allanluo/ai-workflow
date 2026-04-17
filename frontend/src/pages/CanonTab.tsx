@@ -1,17 +1,20 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   fetchProjectAssets,
   createAsset,
+  createAssetVersion,
   updateAsset,
   fetchProjectWorkflowRuns,
   fetchProjectWorkflows,
   generateCharacterImage,
   type Asset,
+  type AssetVersion,
 } from '../lib/api';
-import { Button, Badge, Input, Textarea, Select } from '../components/common';
+import { Button, Input, Textarea, Select } from '../components/common';
 import { showToast } from '../stores';
+import type { CanonListItem } from './CanonPage/CanonListPanel';
 
 interface CanonTabProps {
   projectId: string;
@@ -82,7 +85,7 @@ export function CanonTab({ projectId }: CanonTabProps) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const { id: projectIdParam } = useParams();
-  const [selectedAsset, setSelectedAsset] = useState<Asset | null>(null);
+  const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState<CanonContent>(emptyCanon);
   const [generatingCharacterIndex, setGeneratingCharacterIndex] = useState<number | null>(null);
@@ -118,8 +121,14 @@ export function CanonTab({ projectId }: CanonTabProps) {
 
   const createMutation = useMutation({
     mutationFn: createAsset,
-    onSuccess: () => {
+    onSuccess: asset => {
+      queryClient.setQueryData<Asset[]>(['project-assets', projectId], prev =>
+        prev ? [asset, ...prev] : [asset]
+      );
       queryClient.invalidateQueries({ queryKey: ['project-assets', projectId] });
+      setSelectedAssetId(asset.id);
+      setEditContent(emptyCanon);
+      setIsEditing(true);
     },
   });
 
@@ -131,13 +140,50 @@ export function CanonTab({ projectId }: CanonTabProps) {
       assetId: string;
       content: CanonContent;
       close?: boolean;
-    }) => updateAsset(assetId, { content: content as unknown as Record<string, unknown> }),
-    onSuccess: (asset, variables) => {
+    }) =>
+      createAssetVersion(assetId, {
+        content: content as unknown as Record<string, unknown>,
+        source_mode: 'manual',
+        status: 'draft',
+        make_current: true,
+      }),
+    onSuccess: (_assetVersion: AssetVersion, variables) => {
       queryClient.invalidateQueries({ queryKey: ['project-assets', projectId] });
-      setSelectedAsset(asset);
       if (variables.close !== false) {
         setIsEditing(false);
       }
+      showToast({ type: 'success', title: 'Saved', message: 'Canon updated.' });
+    },
+    onError: err => {
+      showToast({
+        type: 'error',
+        title: 'Save failed',
+        message: err instanceof Error ? err.message : 'Unknown error',
+      });
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: async (assetId: string) => {
+      await updateAsset(assetId, { status: 'deprecated' });
+      return true;
+    },
+    onSuccess: (_deleted, assetId) => {
+      queryClient.setQueryData<Asset[]>(['project-assets', projectId], prev =>
+        (prev ?? []).map(a => (a.id === assetId ? { ...a, status: 'deprecated' } : a))
+      );
+      queryClient.invalidateQueries({ queryKey: ['project-assets', projectId] });
+      setSelectedAssetId(prev => (prev === assetId ? null : prev));
+      setIsEditing(false);
+      setEditContent(emptyCanon);
+      showToast({ type: 'success', title: 'Deleted', message: 'Canon removed from the list.' });
+    },
+    onError: err => {
+      showToast({
+        type: 'error',
+        title: 'Delete failed',
+        message: err instanceof Error ? err.message : 'Unknown error',
+      });
     },
   });
 
@@ -145,24 +191,25 @@ export function CanonTab({ projectId }: CanonTabProps) {
     mutationFn: generateCharacterImage,
   });
 
-  const canonAssets = allAssets?.filter(a => a.asset_type === 'canon_text') || [];
+  const canonAssets = useMemo(
+    () => (allAssets ?? []).filter(a => a.asset_type === 'canon_text' && a.status !== 'deprecated'),
+    [allAssets]
+  );
+  const sortedCanonAssets = useMemo(
+    () => [...canonAssets].sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()),
+    [canonAssets]
+  );
+
+  useEffect(() => {
+    if (!selectedAssetId && sortedCanonAssets.length > 0) {
+      setSelectedAssetId(sortedCanonAssets[0].id);
+    }
+  }, [selectedAssetId, sortedCanonAssets]);
 
   const workflowRunIds = [
     ...new Set(canonAssets.map(a => a.current_version?.workflow_run_id).filter(Boolean)),
   ];
   const filteredRunMap = workflowRunMap?.filter(r => workflowRunIds.includes(r.id)) || [];
-
-  if (!projectId) {
-    return <div className="p-4 text-red-500">No projectId provided</div>;
-  }
-
-  if (isLoading) {
-    return <div className="p-4 text-[var(--text-muted)]">Loading assets...</div>;
-  }
-
-  if (error) {
-    return <div className="p-4 text-red-500">Error: {String(error)}</div>;
-  }
 
   const handleCreateCanon = () => {
     createMutation.mutate({
@@ -176,9 +223,59 @@ export function CanonTab({ projectId }: CanonTabProps) {
     });
   };
 
-  const handleOpenAsset = (asset: Asset) => {
-    setSelectedAsset(asset);
-    setEditContent(getContent(asset));
+  const selectedAsset: Asset | null =
+    sortedCanonAssets.find(a => a.id === selectedAssetId) ?? null;
+
+  const getCanonListTitle = (asset: Asset): string => {
+    const title = typeof asset.title === 'string' ? asset.title.trim() : '';
+    if (!title) return 'Untitled Canon';
+    if (/extract[_\-\s]?canon\s*output/i.test(title)) return 'Generated Canon';
+    if (/canon[_\-\s]?bundle/i.test(title)) return 'Generated Canon';
+    return title;
+  };
+
+  const getCanonListSubtitle = (asset: Asset): string => {
+    const raw =
+      asset.current_version?.content ?? asset.current_approved_version?.content ?? ({} as unknown);
+
+    if (!raw || typeof raw !== 'object') return 'No summary';
+    const record = raw as Record<string, unknown>;
+
+    const summary = typeof record.summary === 'string' ? record.summary.trim() : '';
+    if (summary) return summary;
+
+    const tone = typeof record.tone === 'string' ? record.tone.trim() : '';
+    const themes = Array.isArray(record.themes)
+      ? (record.themes.filter(t => typeof t === 'string') as string[])
+      : [];
+
+    const fallback = [
+      tone ? `Tone: ${tone}` : null,
+      themes.length > 0 ? `Themes: ${themes.slice(0, 3).join(', ')}` : null,
+    ]
+      .filter(Boolean)
+      .join(' · ');
+    if (fallback) return fallback;
+
+    const text = typeof record.text === 'string' ? record.text.trim() : '';
+    if (text) return text.slice(0, 200);
+
+    return 'No summary';
+  };
+
+  const canonListItems: CanonListItem[] = useMemo(() => {
+    return sortedCanonAssets.map(asset => {
+      return {
+        assetId: asset.id,
+        title: getCanonListTitle(asset),
+        subtitle: getCanonListSubtitle(asset),
+        updatedAt: asset.updated_at,
+      };
+    });
+  }, [sortedCanonAssets]);
+
+  const handleSelectAssetId = (assetId: string) => {
+    setSelectedAssetId(assetId);
     setIsEditing(false);
   };
 
@@ -193,6 +290,38 @@ export function CanonTab({ projectId }: CanonTabProps) {
       updateMutation.mutate({ assetId: selectedAsset.id, content: editContent, close: true });
     }
   };
+
+  const handleDelete = () => {
+    if (!selectedAsset) return;
+    const title = selectedAsset.title?.trim() || 'Untitled Canon';
+    const ok = window.confirm(`Delete "${title}"?\n\nThis will remove it from the list.`);
+    if (!ok) return;
+    deleteMutation.mutate(selectedAsset.id);
+  };
+
+  useEffect(() => {
+    if (!selectedAssetId) {
+      setEditContent(emptyCanon);
+      setIsEditing(false);
+      return;
+    }
+    if (!selectedAsset) return;
+    // When selection/version changes, refresh the draft only if we're not actively editing.
+    if (!isEditing) setEditContent(getContent(selectedAsset));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedAssetId, selectedAsset?.current_asset_version_id]);
+
+  if (!projectId) {
+    return <div className="p-4 text-red-500">No projectId provided</div>;
+  }
+
+  if (isLoading) {
+    return <div className="p-4 text-[var(--text-muted)]">Loading assets...</div>;
+  }
+
+  if (error) {
+    return <div className="p-4 text-red-500">Error: {String(error)}</div>;
+  }
 
   const addCharacter = () => {
     setEditContent(prev => ({
@@ -362,10 +491,6 @@ export function CanonTab({ projectId }: CanonTabProps) {
         ),
       };
       setEditContent(nextContent);
-
-      if (selectedAsset) {
-        updateMutation.mutate({ assetId: selectedAsset.id, content: nextContent, close: false });
-      }
 
       showToast({
         type: 'success',
@@ -648,7 +773,7 @@ export function CanonTab({ projectId }: CanonTabProps) {
     return normalized as CanonContent;
   };
 
-  const getContent = (asset: Asset): CanonContent => {
+  function getContent(asset: Asset): CanonContent {
     const rawContent =
       asset.current_version?.content || asset.current_approved_version?.content || {};
 
@@ -790,7 +915,7 @@ export function CanonTab({ projectId }: CanonTabProps) {
     }
 
     return emptyCanon;
-  };
+  }
 
   const renderView = (content: CanonContent | undefined | null) => {
     if (!content || typeof content !== 'object') {
@@ -1473,213 +1598,125 @@ export function CanonTab({ projectId }: CanonTabProps) {
     </div>
   );
 
-  return (
-    <div className="h-full overflow-auto">
-      <div className="p-6 pb-4 border-b border-[var(--border-light)]">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-xl font-semibold text-[var(--text-primary)]">Story & Canon</h2>
-            <p className="text-sm text-[var(--text-muted)]">
-              Core story elements and approved canonical content
-            </p>
-          </div>
-          <Button variant="primary" size="sm" onClick={handleCreateCanon}>
-            + New Canon
-          </Button>
-        </div>
-        <div className="flex gap-4 mt-4">
-          <div className="flex items-center gap-2 px-3 py-2 bg-[var(--bg-elevated)] rounded-lg border border-[var(--border-light)]">
-            <span className="text-2xl font-bold text-[var(--success)]">{canonAssets.length}</span>
-            <span className="text-xs text-[var(--text-muted)]">Canon</span>
-          </div>
-        </div>
-      </div>
-      <div className="p-6">
-        <div className="space-y-8">
-          {canonAssets.length > 0 ? (
-            <section>
-              <h3 className="text-sm font-semibold text-[var(--text-muted)] uppercase tracking-wider mb-3">
-                Canon Documents
-              </h3>
-              <div className="grid gap-3">
-                {canonAssets.map(asset => {
-                  const content = getContent(asset);
-                  const version = asset.current_version;
-                  const runId = version?.workflow_run_id;
-                  const run = runId ? filteredRunMap.find(r => r.id === runId) : null;
-                  const wfVersionId = run?.workflow_version_id;
-                  const wfTitle = wfVersionId && workflowMap?.[wfVersionId];
-                  const workflowRef = runId
-                    ? wfTitle || `Run ${runId.slice(0, 8)}`
-                    : version?.source_mode === 'workflow'
-                      ? 'Workflow generated'
-                      : version?.source_mode === 'copilot'
-                        ? 'Copilot generated'
-                        : 'Manual';
-                  const handleCardClick = (e: React.MouseEvent) => {
-                    e.stopPropagation();
-                    if (wfVersionId && projectIdParam)
-                      navigate(`/projects/${projectIdParam}/workflows?select=${wfVersionId}`);
-                    else handleOpenAsset(asset);
-                  };
-                  return (
-                    <div
-                      key={asset.id}
-                      onClick={handleCardClick}
-                      className={wfVersionId ? 'cursor-pointer hover:opacity-90' : 'cursor-pointer'}
-                    >
-                      <div className="p-4 bg-[var(--bg-elevated)] border-2 border-[var(--success)] rounded-lg hover:shadow-lg hover:border-[var(--success)] transition-all">
-                        <div className="flex items-center gap-2 mb-2">
-                          <svg
-                            className="w-4 h-4 text-[var(--success)]"
-                            fill="currentColor"
-                            viewBox="0 0 20 20"
-                          >
-                            <path
-                              fillRule="evenodd"
-                              d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-                              clipRule="evenodd"
-                            />
-                          </svg>
-                          <span className="font-semibold text-[var(--text-primary)]">
-                            {asset.title || 'Untitled Canon'}
-                          </span>
-                          <Badge variant="approved">Approved</Badge>
-                        </div>
-                        <div className="text-xs text-[var(--text-muted)] mb-2">
-                          {wfVersionId ? (
-                            <span className="text-[var(--accent)] hover:underline">
-                              {workflowRef}
-                            </span>
-                          ) : (
-                            workflowRef
-                          )}
-                          {version?.created_at && (
-                            <> · {new Date(version.created_at).toLocaleDateString()}</>
-                          )}
-                        </div>
-                        {content.summary && (
-                          <p className="text-sm text-[var(--text-secondary)] line-clamp-2">
-                            {content.summary.slice(0, 150)}
-                          </p>
-                        )}
-                        {content.characters && content.characters.length > 0 && (
-                          <div className="mt-3 flex items-center gap-2">
-                            <div className="flex -space-x-2">
-                              {content.characters.slice(0, 4).map((c, idx) => (
-                                <div key={idx} className="shadow-sm">
-                                  {renderAvatar(c.image_url, c.name || `Character ${idx + 1}`)}
-                                </div>
-                              ))}
-                            </div>
-                            <span className="text-xs text-[var(--text-muted)]">
-                              {content.characters.length} character
-                              {content.characters.length === 1 ? '' : 's'}
-                            </span>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </section>
-          ) : (
-            <div className="text-center py-12 border-2 border-dashed border-[var(--border-light)] rounded-lg">
-              <div className="text-4xl mb-3">📖</div>
-              <h4 className="font-medium text-[var(--text-primary)] mb-1">
-                No Canon Documents Yet
-              </h4>
-              <p className="text-sm text-[var(--text-muted)] mb-4">
-                Create a workflow to extract canon from your source content
-              </p>
-              <Button variant="primary" size="sm" onClick={handleCreateCanon}>
-                Create Canon Document
-              </Button>
-            </div>
-          )}
-        </div>
-      </div>
-      {selectedAsset && (
-        <div
-          className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4"
-          onClick={() => {
-            setSelectedAsset(null);
-            setIsEditing(false);
-          }}
-        >
-          <div
-            className="bg-[var(--bg-base)] rounded-xl border border-[var(--border-light)] w-full max-w-4xl max-h-[85vh] overflow-hidden shadow-2xl"
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between p-5 border-b border-[var(--border-light)] bg-[var(--bg-elevated)]">
-              <h3 className="text-lg font-semibold text-[var(--text-primary)]">
-                {selectedAsset.title || 'Untitled'}
-                {isEditing && <span className="ml-2 text-xs text-[var(--accent)]">(Editing)</span>}
-              </h3>
-              <div className="flex items-center gap-2">
-                {!isEditing && (
-                  <Button variant="primary" size="sm" onClick={handleBeginEdit}>
-                    Edit
-                  </Button>
-                )}
-                <button
-                  onClick={() => {
-                    setSelectedAsset(null);
-                    setIsEditing(false);
-                  }}
-                  className="p-2 hover:bg-[var(--bg-hover)] rounded-lg"
-                >
-                  <svg
-                    className="w-5 h-5 text-[var(--text-muted)]"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M6 18L18 6M6 6l12 12"
-                    />
-                  </svg>
-                </button>
-              </div>
-            </div>
-            <div className="p-5 overflow-auto max-h-[calc(85vh-80px)]">
-              {isEditing ? renderEditForm() : renderView(getContent(selectedAsset))}
-            </div>
-            <div className="flex items-center justify-end gap-3 p-4 border-t border-[var(--border-light)] bg-[var(--bg-elevated)]">
-              {isEditing ? (
-                <>
-                  <Button variant="ghost" size="sm" onClick={() => setIsEditing(false)}>
-                    Cancel
-                  </Button>
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    onClick={handleSave}
-                    disabled={updateMutation.isPending}
-                  >
-                    {updateMutation.isPending ? 'Saving...' : 'Save Changes'}
-                  </Button>
-                </>
+  const selectedVersion = selectedAsset?.current_version;
+  const selectedRunId = selectedVersion?.workflow_run_id;
+  const selectedRun = selectedRunId ? filteredRunMap.find(r => r.id === selectedRunId) : null;
+  const selectedWorkflowVersionId = selectedRun?.workflow_version_id;
+  const selectedWorkflowTitle =
+    selectedWorkflowVersionId && workflowMap ? workflowMap[selectedWorkflowVersionId] : null;
+  const selectedWorkflowRef = selectedRunId
+    ? selectedWorkflowTitle || `Run ${selectedRunId.slice(0, 8)}`
+    : selectedVersion?.source_mode === 'workflow'
+      ? 'Workflow generated'
+      : selectedVersion?.source_mode === 'copilot'
+        ? 'Copilot generated'
+        : 'Manual';
+
+	  return (
+	    <div className="flex flex-col h-full comfy-bg-primary">
+		      <div className="p-4 flex items-center justify-between gap-3">
+	        <div className="min-w-0">
+	          <div className="text-sm font-semibold text-comfy-text truncate">Story & Canon</div>
+	        </div>
+	        <div className="flex items-center gap-2">
+	          {selectedWorkflowVersionId && projectIdParam && (
+	            <button
+	              type="button"
+              className="comfy-btn-secondary text-xs"
+              onClick={() =>
+                navigate(`/projects/${projectIdParam}/workflows?select=${selectedWorkflowVersionId}`)
+              }
+            >
+              Workflow
+	            </button>
+	          )}
+	        </div>
+	      </div>
+
+	      <div className="p-4 border-b border-comfy-border">
+	        <div className="flex items-end gap-2">
+	          <div className="flex-1 min-w-0">
+	            <select
+	              value={selectedAssetId || canonListItems[0]?.assetId || ''}
+	              onChange={e => handleSelectAssetId(e.target.value)}
+	              className="comfy-input w-full text-xs"
+              disabled={canonListItems.length === 0}
+            >
+              {canonListItems.length === 0 ? (
+                <option value="">No canon yet</option>
               ) : (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => {
-                    setSelectedAsset(null);
-                    setIsEditing(false);
-                  }}
-                >
-                  Close
-                </Button>
+                canonListItems.map(item => (
+                  <option key={item.assetId} value={item.assetId}>
+                    {item.title} · {new Date(item.updatedAt).toLocaleDateString()}
+                  </option>
+                ))
               )}
-            </div>
+	            </select>
+	          </div>
+		          <div className="flex items-center gap-2">
+		            <button
+		              type="button"
+		              onClick={handleCreateCanon}
+		              disabled={createMutation.isPending}
+		              className="comfy-btn text-xs disabled:opacity-50"
+		            >
+		              + Add
+		            </button>
+		            <button
+		              type="button"
+		              onClick={handleDelete}
+		              disabled={!selectedAsset || deleteMutation.isPending || updateMutation.isPending}
+		              className="comfy-btn-danger text-xs disabled:opacity-50"
+		            >
+		              Delete
+		            </button>
+		            {!selectedAsset ? null : isEditing ? (
+		              <>
+		                <button
+		                  type="button"
+		                  onClick={() => {
+	                    setEditContent(getContent(selectedAsset));
+	                    setIsEditing(false);
+	                  }}
+	                  disabled={updateMutation.isPending}
+	                  className="comfy-btn-secondary text-xs disabled:opacity-50"
+	                >
+	                  Cancel
+	                </button>
+	                <button
+	                  type="button"
+	                  onClick={handleSave}
+	                  disabled={updateMutation.isPending}
+	                  className="comfy-btn text-xs disabled:opacity-50"
+	                >
+	                  {updateMutation.isPending ? 'Saving…' : 'Save Changes'}
+	                </button>
+	              </>
+	            ) : (
+	              <button type="button" onClick={handleBeginEdit} className="comfy-btn-secondary text-xs">
+	                Edit
+	              </button>
+	            )}
+	          </div>
+	        </div>
+
+      </div>
+
+      <div className="flex-1 overflow-auto p-4">
+        {selectedAsset ? (
+          isEditing ? (
+            renderEditForm()
+          ) : (
+            renderView(getContent(selectedAsset))
+          )
+        ) : (
+          <div className="text-sm text-comfy-muted">
+            {canonListItems.length === 0
+              ? 'No canon documents yet. Create one to get started.'
+              : 'Select a canon document from the dropdown.'}
           </div>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }

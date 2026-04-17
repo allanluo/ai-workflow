@@ -12,6 +12,7 @@ import {
 } from '@ai-workflow/database';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { config } from '../config.js';
 
 const createAssetSchema = z.object({
   asset_type: z.string().min(1).max(100),
@@ -329,6 +330,295 @@ export async function registerAssetRoutes(app: FastifyInstance) {
         error: {
           code: 'image_generation_failed',
           message: err instanceof Error ? err.message : 'Image generation failed',
+        },
+      };
+    }
+  });
+
+  app.post('/projects/:projectId/videos', async (request, reply) => {
+    z.object({ projectId: z.string() }).parse(request.params);
+    const body = z
+      .object({
+        prompt: z.string(),
+        workflow: z.string().optional(),
+        width: z.number().optional().default(1024),
+        height: z.number().optional().default(576),
+      })
+      .parse(request.body);
+
+    const { createVideo } = await import('../services/adapters.js');
+
+    try {
+      const response = await createVideo({
+        prompt: body.prompt,
+        workflow: body.workflow,
+        width: body.width,
+        height: body.height,
+      });
+
+      return {
+        ok: true,
+        data: {
+          job_id: response.job_id,
+          prompt_id: response.prompt_id,
+          video_path: response.video_path,
+          video_url: response.video_url,
+          status: response.status,
+        },
+        error: null,
+      };
+    } catch (err) {
+      reply.code(500);
+      return {
+        ok: false,
+        data: null,
+        error: {
+          code: 'video_generation_failed',
+          message: err instanceof Error ? err.message : 'Video generation failed',
+        },
+      };
+    }
+  });
+
+  app.post('/projects/:projectId/videos/from-image', async (request, reply) => {
+    z.object({ projectId: z.string() }).parse(request.params);
+    const body = z
+      .object({
+        prompt: z.string(),
+        workflow: z.string().optional().default('image2video'),
+        width: z.number().optional().default(640),
+        height: z.number().optional().default(480),
+        length: z.number().optional().default(81),
+        reference_image_url: z.string().min(1),
+      })
+      .parse(request.body);
+
+    const base = new URL(config.localAIAPI.endpoint);
+    const referenceUrl = body.reference_image_url.startsWith('/')
+      ? new URL(body.reference_image_url, base).toString()
+      : body.reference_image_url;
+
+    let parsed: URL;
+    try {
+      parsed = new URL(referenceUrl);
+    } catch {
+      reply.code(400);
+      return {
+        ok: false,
+        data: null,
+        error: { code: 'invalid_reference_image_url', message: 'Invalid reference image URL' },
+      };
+    }
+
+    // SSRF guard: only allow pulling the reference image from the configured Local AI API host.
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      reply.code(400);
+      return {
+        ok: false,
+        data: null,
+        error: { code: 'invalid_reference_image_url', message: 'Invalid reference image URL' },
+      };
+    }
+
+    if (parsed.host !== base.host) {
+      reply.code(400);
+      return {
+        ok: false,
+        data: null,
+        error: {
+          code: 'reference_image_host_not_allowed',
+          message: 'Reference image must be hosted by the Local AI API',
+        },
+      };
+    }
+
+    let bytes: ArrayBuffer;
+    let contentType: string;
+    try {
+      const imageResponse = await fetch(parsed.toString());
+      if (!imageResponse.ok) {
+        reply.code(400);
+        return {
+          ok: false,
+          data: null,
+          error: {
+            code: 'reference_image_fetch_failed',
+            message: `Failed to fetch reference image (${imageResponse.status})`,
+          },
+        };
+      }
+
+      contentType = imageResponse.headers.get('content-type') ?? 'image/jpeg';
+      bytes = await imageResponse.arrayBuffer();
+    } catch (err) {
+      reply.code(400);
+      return {
+        ok: false,
+        data: null,
+        error: {
+          code: 'reference_image_fetch_failed',
+          message: err instanceof Error ? err.message : 'Failed to fetch reference image',
+        },
+      };
+    }
+
+    const filename = parsed.pathname.split('/').pop() || 'reference.jpg';
+
+    const { createVideoFromImage } = await import('../services/adapters.js');
+
+    try {
+      const response = await createVideoFromImage({
+        prompt: body.prompt,
+        workflow: body.workflow,
+        width: body.width,
+        height: body.height,
+        length: body.length,
+        reference_image: {
+          bytes,
+          contentType,
+          filename,
+        },
+      });
+
+      return {
+        ok: true,
+        data: {
+          job_id: response.job_id,
+          prompt_id: response.prompt_id,
+          video_path: response.video_path,
+          video_url: response.video_url,
+          status: response.status,
+        },
+        error: null,
+      };
+    } catch (err) {
+      reply.code(500);
+      return {
+        ok: false,
+        data: null,
+        error: {
+          code: 'video_generation_failed',
+          message: err instanceof Error ? err.message : 'Video generation failed',
+        },
+      };
+    }
+  });
+
+  app.post('/projects/:projectId/voiceovers', async (request, reply) => {
+    z.object({ projectId: z.string() }).parse(request.params);
+    const body = z
+      .object({
+        text: z.string().min(1),
+        template: z.string().optional(),
+        provider: z.enum(['piper', 'cosyvoice']).optional(),
+        speed: z.number().optional(),
+        volume: z.number().optional(),
+        prompt_text: z.string().optional(),
+        prompt_wav: z.string().optional(),
+        model_dir: z.string().optional(),
+      })
+      .parse(request.body);
+
+    const { generateSpeech } = await import('../services/adapters.js');
+
+    try {
+      const response = await generateSpeech({
+        text: body.text,
+        template: body.template ?? config.defaults.tts_voice,
+        provider: body.provider,
+        speed: body.speed,
+        volume: body.volume,
+        prompt_text: body.prompt_text,
+        prompt_wav: body.prompt_wav,
+        model_dir: body.model_dir,
+      });
+
+      return {
+        ok: true,
+        data: {
+          job_id: response.job_id,
+          status: response.status,
+          audio_url: response.audio_url,
+          audio_path: response.audio_path,
+          provider: response.provider,
+        },
+        error: null,
+      };
+    } catch (err) {
+      reply.code(500);
+      return {
+        ok: false,
+        data: null,
+        error: {
+          code: 'voiceover_generation_failed',
+          message: err instanceof Error ? err.message : 'Voice-over generation failed',
+        },
+      };
+    }
+  });
+
+  app.post('/projects/:projectId/sounds', async (request, reply) => {
+    z.object({ projectId: z.string() }).parse(request.params);
+    const body = z
+      .object({
+        prompt: z.string().min(1),
+        workflow: z.string().optional(),
+        duration_seconds: z.number().optional(),
+        batch_size: z.number().optional(),
+        negative_prompt: z.string().optional(),
+      })
+      .parse(request.body);
+
+    const { generateSound } = await import('../services/adapters.js');
+
+    try {
+      const response = await generateSound({
+        prompt: body.prompt,
+        workflow: body.workflow,
+        duration_seconds: body.duration_seconds,
+        batch_size: body.batch_size,
+        negative_prompt: body.negative_prompt,
+      });
+
+      return {
+        ok: true,
+        data: {
+          job_id: response.job_id,
+          status: response.status,
+          prompt_id: response.prompt_id,
+          audio_url: response.audio_url,
+          audio_path: response.audio_path,
+        },
+        error: null,
+      };
+    } catch (err) {
+      reply.code(500);
+      return {
+        ok: false,
+        data: null,
+        error: {
+          code: 'sound_generation_failed',
+          message: err instanceof Error ? err.message : 'Sound generation failed',
+        },
+      };
+    }
+  });
+
+  app.get('/jobs/:jobId', async (request, reply) => {
+    const params = z.object({ jobId: z.string() }).parse(request.params);
+    const { getJobStatus } = await import('../services/adapters.js');
+
+    try {
+      const job = await getJobStatus(params.jobId);
+      return { ok: true, data: { job }, error: null };
+    } catch (err) {
+      reply.code(500);
+      return {
+        ok: false,
+        data: null,
+        error: {
+          code: 'job_status_failed',
+          message: err instanceof Error ? err.message : 'Job status failed',
         },
       };
     }

@@ -157,7 +157,38 @@ export const workflowNodeCatalog: WorkflowCatalogNodeDefinition[] = [
     inputSummary: 'scene_outline',
     outputSummary: 'shot_plan',
     defaultParams: {
-      prompt: `Turn the scene outline into a shot plan with framing, angle, motion, and continuity notes for each shot. Output ONLY valid JSON (no markdown, no explanation, no text before or after). The JSON should conform to the following schema:
+      prompt: `You are creating a shot plan for a story based on the provided SOURCE CONTENT (story, canon, and optionally a scene outline).
+
+Rules:
+- If SOURCE CONTENT contains a JSON object with a top-level key "scenes" (an array of scenes), then generate shots PER SCENE.
+  - For each scene, generate 4–10 shots that match that scene's title/purpose/emotionalBeat/setting.
+  - Keep shot numbering restart per scene (1..N) OR use global numbering, but be consistent.
+- If no scenes are provided, generate 12–30 shots that cover the story progression using story+canon context.
+- Keep descriptions concrete and filmable. Avoid vague repetition.
+- Output ONLY valid JSON (no markdown, no explanation, no text before or after).
+
+The JSON MUST conform to one of these schemas:
+
+Schema A (preferred when scenes exist):
+{
+  "scenes": [
+    {
+      "title": "Scene title",
+      "shots": [
+        {
+          "shotNumber": "1",
+          "description": "Brief description of the shot",
+          "framing": "e.g., Wide, Medium, Close-up",
+          "angle": "e.g., Eye-level, High, Low",
+          "motion": "e.g., Pan, Tilt, Dolly, Static",
+          "continuityNotes": "Notes for seamless transitions"
+        }
+      ]
+    }
+  ]
+}
+
+Schema B (when scenes are not available):
 {
   "shots": [
     {

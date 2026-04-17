@@ -85,7 +85,76 @@ async function executeLLMNode(
 ): Promise<Record<string, unknown>> {
   const innerParams = (snapshot.params as Record<string, unknown>) || {};
   const baseInstructions = typeof innerParams.prompt === 'string' ? innerParams.prompt : '';
+  const nodeType = typeof snapshot.node_type === 'string' ? snapshot.node_type : '';
   let sourceContent = '';
+
+  const stringifyForContext = (value: unknown, maxLen = 12000) => {
+    try {
+      const json = JSON.stringify(value, null, 2) ?? '';
+      if (json.length <= maxLen) return json;
+      return `${json.slice(0, maxLen)}\n…(truncated ${json.length - maxLen} chars)`;
+    } catch {
+      const text = String(value);
+      if (text.length <= maxLen) return text;
+      return `${text.slice(0, maxLen)}\n…(truncated ${text.length - maxLen} chars)`;
+    }
+  };
+
+  const extractTextLike = (prevOutput: Record<string, unknown>): string | null => {
+    if (typeof prevOutput.text === 'string' && prevOutput.text.trim()) {
+      return prevOutput.text;
+    }
+    if (typeof prevOutput._raw === 'string' && prevOutput._raw.trim()) {
+      return prevOutput._raw;
+    }
+    // Many nodes return structured JSON (e.g., canon, scenes, shot_plan). Include it as context.
+    if (prevOutput && typeof prevOutput === 'object') {
+      const { _raw: _ignoredRaw, ...rest } = prevOutput as Record<string, unknown>;
+      const filtered = Object.fromEntries(
+        Object.entries(rest).filter(
+          ([k]) => !['_debug', '_debug_keys', 'result', 'error', 'model', 'job_id', 'status'].includes(k)
+        )
+      );
+      const hasMeaningfulKeys = Object.keys(filtered).some(k => k.trim());
+      if (hasMeaningfulKeys) {
+        return stringifyForContext(filtered);
+      }
+    }
+    return null;
+  };
+
+  const extractProvidedScenes = () => {
+    if (!snapshot.resolved_input || typeof snapshot.resolved_input !== 'object') return null;
+    const resolved = snapshot.resolved_input as Record<string, unknown>;
+    for (const key of Object.keys(resolved)) {
+      const prev = resolved[key];
+      if (!prev || typeof prev !== 'object') continue;
+      const prevObj = prev as Record<string, unknown>;
+      const scenesRaw = prevObj.scenes;
+      if (!Array.isArray(scenesRaw)) continue;
+      const scenes = scenesRaw
+        .filter(s => s && typeof s === 'object')
+        .map(s => {
+          const so = s as Record<string, unknown>;
+          const title = typeof so.title === 'string' ? so.title : '';
+          const purpose = typeof so.purpose === 'string' ? so.purpose : '';
+          const emotionalBeat =
+            typeof so.emotionalBeat === 'string'
+              ? so.emotionalBeat
+              : typeof so.emotional_beat === 'string'
+                ? (so.emotional_beat as string)
+                : '';
+          const setting = typeof so.setting === 'string' ? so.setting : '';
+          return { title, purpose, emotionalBeat, setting };
+        })
+        .filter(s => s.title || s.purpose || s.emotionalBeat || s.setting);
+
+      if (scenes.length > 0) {
+        return { sourceKey: key, scenes };
+      }
+    }
+    return null;
+  };
 
   // Collect text from all previous node outputs
   if (snapshot.resolved_input) {
@@ -93,10 +162,10 @@ async function executeLLMNode(
     const contents: string[] = [];
     for (const key of Object.keys(resolved)) {
       const prevOutput = resolved[key] as Record<string, unknown>;
-      // Look for 'text' field (common for LLM/Input nodes)
-      if (prevOutput && typeof prevOutput.text === 'string' && prevOutput.text) {
-        contents.push(prevOutput.text);
-      }
+      if (!prevOutput || typeof prevOutput !== 'object') continue;
+      const textLike = extractTextLike(prevOutput);
+      if (!textLike) continue;
+      contents.push(`### ${key} ###\n${textLike}`);
     }
     sourceContent = contents.join('\n\n');
   }
@@ -107,6 +176,19 @@ async function executeLLMNode(
     finalPrompt = `${baseInstructions}\n\n### SOURCE CONTENT ###\n${sourceContent}`;
   } else {
     finalPrompt = baseInstructions || sourceContent;
+  }
+
+  const providedScenes = nodeType === 'generate_shot_plan' ? extractProvidedScenes() : null;
+  if (nodeType === 'generate_shot_plan' && providedScenes) {
+    const directive = `IMPORTANT: A scene outline was provided in SOURCE CONTENT (from: ${providedScenes.sourceKey}). You MUST output a JSON object with a top-level "scenes" array, and each scene MUST contain a "title" and a "shots" array with multiple shots for that scene. Do NOT output a top-level "shots" array when scenes are provided.`;
+    finalPrompt = [
+      baseInstructions,
+      directive,
+      `### PROVIDED_SCENES_JSON ###\n${stringifyForContext({ scenes: providedScenes.scenes }, 12000)}`,
+      sourceContent ? `### SOURCE CONTENT ###\n${sourceContent}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n\n');
   }
 
   const model =
@@ -134,14 +216,54 @@ async function executeLLMNode(
   if (baseInstructions.toLowerCase().includes('json')) {
     try {
       // Try direct JSON parse first
-      const parsed = JSON.parse(rawText);
+      const parsed = JSON.parse(rawText) as Record<string, unknown>;
+
+      if (nodeType === 'generate_shot_plan' && providedScenes) {
+        const hasScenes = Array.isArray((parsed as Record<string, unknown>).scenes);
+        const flatShots = (parsed as Record<string, unknown>).shots;
+        if (!hasScenes && Array.isArray(flatShots)) {
+          const shots = flatShots.filter(s => s && typeof s === 'object');
+          let cursor = 0;
+          const sceneCount = providedScenes.scenes.length;
+          const scenes = providedScenes.scenes.map((scene, idx) => {
+            const remainingShots = Math.max(0, shots.length - cursor);
+            const remainingScenes = Math.max(1, sceneCount - idx);
+            const take = Math.ceil(remainingShots / remainingScenes);
+            const sceneShots = shots.slice(cursor, cursor + take);
+            cursor += take;
+            return { ...scene, shots: sceneShots };
+          });
+          return { scenes, _raw: rawText };
+        }
+      }
+
       return { ...parsed, _raw: rawText };
     } catch {
       // Try to extract JSON from markdown code blocks
       const jsonMatch = rawText.match(/```(?:json)?\s*([\s\S]*?)```/);
       if (jsonMatch) {
         try {
-          const parsed = JSON.parse(jsonMatch[1].trim());
+          const parsed = JSON.parse(jsonMatch[1].trim()) as Record<string, unknown>;
+
+          if (nodeType === 'generate_shot_plan' && providedScenes) {
+            const hasScenes = Array.isArray((parsed as Record<string, unknown>).scenes);
+            const flatShots = (parsed as Record<string, unknown>).shots;
+            if (!hasScenes && Array.isArray(flatShots)) {
+              const shots = flatShots.filter(s => s && typeof s === 'object');
+              let cursor = 0;
+              const sceneCount = providedScenes.scenes.length;
+              const scenes = providedScenes.scenes.map((scene, idx) => {
+                const remainingShots = Math.max(0, shots.length - cursor);
+                const remainingScenes = Math.max(1, sceneCount - idx);
+                const take = Math.ceil(remainingShots / remainingScenes);
+                const sceneShots = shots.slice(cursor, cursor + take);
+                cursor += take;
+                return { ...scene, shots: sceneShots };
+              });
+              return { scenes, _raw: rawText };
+            }
+          }
+
           return { ...parsed, _raw: rawText };
         } catch {}
       }
@@ -149,7 +271,27 @@ async function executeLLMNode(
       const plainMatch = rawText.match(/\{[\s\S]*\}/);
       if (plainMatch) {
         try {
-          const parsed = JSON.parse(plainMatch[0]);
+          const parsed = JSON.parse(plainMatch[0]) as Record<string, unknown>;
+
+          if (nodeType === 'generate_shot_plan' && providedScenes) {
+            const hasScenes = Array.isArray((parsed as Record<string, unknown>).scenes);
+            const flatShots = (parsed as Record<string, unknown>).shots;
+            if (!hasScenes && Array.isArray(flatShots)) {
+              const shots = flatShots.filter(s => s && typeof s === 'object');
+              let cursor = 0;
+              const sceneCount = providedScenes.scenes.length;
+              const scenes = providedScenes.scenes.map((scene, idx) => {
+                const remainingShots = Math.max(0, shots.length - cursor);
+                const remainingScenes = Math.max(1, sceneCount - idx);
+                const take = Math.ceil(remainingShots / remainingScenes);
+                const sceneShots = shots.slice(cursor, cursor + take);
+                cursor += take;
+                return { ...scene, shots: sceneShots };
+              });
+              return { scenes, _raw: rawText };
+            }
+          }
+
           return { ...parsed, _raw: rawText };
         } catch {}
       }

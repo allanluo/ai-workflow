@@ -124,6 +124,61 @@ export async function createVideo(request: VideoCreateRequest): Promise<VideoCre
   });
 }
 
+export interface VideoCreateFromImageRequest {
+  prompt: string;
+  workflow?: string;
+  width?: number;
+  height?: number;
+  length?: number;
+  reference_image: {
+    bytes: ArrayBuffer;
+    contentType: string;
+    filename: string;
+  };
+}
+
+export async function createVideoFromImage(
+  request: VideoCreateFromImageRequest
+): Promise<VideoCreateResponse> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+  try {
+    const form = new FormData();
+    form.append("prompt", request.prompt);
+    if (request.workflow) form.append("workflow", request.workflow);
+    if (typeof request.width === "number") form.append("width", String(request.width));
+    if (typeof request.height === "number") form.append("height", String(request.height));
+    if (typeof request.length === "number") form.append("length", String(request.length));
+
+    const blob = new Blob([request.reference_image.bytes], {
+      type: request.reference_image.contentType
+    });
+    form.append("reference_image", blob, request.reference_image.filename);
+
+    const response = await globalThis.fetch(`${BASE_URL}/api/video/create-from-image`, {
+      method: "POST",
+      body: form,
+      signal: controller.signal
+    });
+
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      const errorBody = await response.text().catch(() => "Unknown error");
+      throw new Error(`API Error ${response.status}: ${errorBody}`);
+    }
+
+    return (await response.json()) as VideoCreateResponse;
+  } catch (error) {
+    clearTimeout(timeout);
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`Request timeout after ${TIMEOUT_MS}ms`);
+    }
+    throw error;
+  }
+}
+
 export interface MusicGenerateRequest {
   text: string;
   prompt?: string;

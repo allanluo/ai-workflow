@@ -27,6 +27,7 @@ import {
   type EditableNode,
   type EditableEdge,
 } from '../../stores/draftStore';
+import { Label } from '../common';
 
 const categoryLabels: Record<WorkflowNodeCategory, string> = {
   input: 'Inputs',
@@ -67,13 +68,7 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-function Label({ children }: { children: ReactNode }) {
-  return (
-    <span className="mb-1 block text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--text-muted)]">
-      {children}
-    </span>
-  );
-}
+
 
 function inputCls() {
   return 'w-full rounded border border-[var(--border)] bg-[var(--bg-input)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none transition focus:border-[var(--accent)]';
