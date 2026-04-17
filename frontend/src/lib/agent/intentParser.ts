@@ -1,8 +1,16 @@
 import type { ParsedIntent } from './types';
 import { createWorkflowSkill } from './skills/createWorkflow';
 import { addSceneSkill } from './skills/addScene';
+import { improveShotPromptSkill } from './skills/improveShotPrompt';
+import type { SkillContext } from './types';
 
-export type SkillName = 'createWorkflow' | 'addScene' | 'explainNode' | 'generateShots' | 'chat';
+export type SkillName =
+  | 'createWorkflow'
+  | 'addScene'
+  | 'improveShotPrompt'
+  | 'explainNode'
+  | 'generateShots'
+  | 'chat';
 
 interface IntentPattern {
   skillName: SkillName;
@@ -49,11 +57,21 @@ const intentPatterns: IntentPattern[] = [
       /tell\s+me\s+about\s+(this\s+)?node/i,
     ],
   },
+  {
+    skillName: 'improveShotPrompt',
+    patterns: [
+      /improve\s+(this\s+)?(shot\s+)?prompt/i,
+      /fix\s+(this\s+)?(shot\s+)?(image\s+)?prompt/i,
+      /make\s+(this\s+)?shot\s+more\s+cinematic/i,
+      /shot\s+prompt\s+improvement/i,
+    ],
+  },
 ];
 
 const skills = {
   createWorkflow: createWorkflowSkill,
   addScene: addSceneSkill,
+  improveShotPrompt: improveShotPromptSkill,
 };
 
 export function parseIntent(userInput: string): ParsedIntent | null {
@@ -75,7 +93,7 @@ export function parseIntent(userInput: string): ParsedIntent | null {
 
 export async function executeSkill(
   skillName: string,
-  context: { projectId: string; workflowId?: string; assetId?: string; selectedNode?: unknown },
+  context: SkillContext,
   userInput: string
 ): Promise<{ skillResult: unknown; shouldChat: boolean }> {
   const skill = skills[skillName as keyof typeof skills];

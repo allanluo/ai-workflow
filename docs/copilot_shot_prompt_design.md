@@ -142,7 +142,9 @@ When the user clicks **Apply**:
 
 ### Frontend (recommended for MVP)
 
-- Add a “shot-aware” mode to `CopilotPanel` by reading `useSelectionStore().selectedShotId`.
+- Implement as a **Copilot skill** (recommended) and render its structured result in `CopilotPanel`.
+- `CopilotPanel` can still offer a “shot-aware” mode by reading `useSelectionStore().selectedShotId`,
+  but the workflow should live in `frontend/src/lib/agent/skills/improveShotPrompt.ts` rather than ad-hoc UI calls.
 - Add helper utilities:
   - `buildShotPromptContext(projectId, shotId)` → `{ canon, scene, shot }`
   - `applyShotImagePromptToPlan(planAssetId, shotId, suggestion)` → creates new asset version
@@ -169,10 +171,13 @@ Introduce `POST /api/copilot/shot-prompt/suggest` to:
 5) **Use**
    - Update image generation to prefer `shot.image.prompt` when present.
 
+Implementation plan (phases):
+
+- `docs/copilot_shot_prompt_implementation_plan.md`
+
 ## Out of Scope (for this MVP)
 
 - Image-based critique (“analyze this generated image and fix prompt automatically”)
 - Global “style presets” UI
 - Automatic bulk prompt improvement for an entire scene or plan
 - Copilot session persistence in DB
-

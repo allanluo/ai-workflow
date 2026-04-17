@@ -1,8 +1,17 @@
 import { useState, useRef, useEffect } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
-import { useSelectionStore, useDraftStore } from '../../stores';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { showToast, useAppStore, useDraftStore, useSelectionStore } from '../../stores';
 import { parseIntent, executeSkill } from '../../lib/agent/intentParser';
-import type { SkillName, SkillResult } from '../../lib/agent/types';
+import type { Proposal, SkillName, SkillResult } from '../../lib/agent/types';
+import { createAssetVersion, fetchAsset } from '../../lib/api';
+import {
+  ensureShotIdsInPlan,
+  locateShotInPlan,
+  parseShotPlanForEdit,
+  updateShotImageOverrideInPlan,
+  writeBackShotPlan,
+} from '../../lib/shotPlanEditing';
+import { useQueryClient } from '@tanstack/react-query';
 
 interface ChatMessage {
   id: string;
@@ -18,15 +27,29 @@ const suggestions = [
 
 export function CopilotPanel() {
   const navigate = useNavigate();
-  const { projectId } = useParams<{ projectId: string }>();
+  const location = useLocation();
+  const currentProjectId = useAppStore(s => s.currentProjectId);
+  const fallbackProjectId = (() => {
+    const m = location.pathname.match(/\/projects\/([^/]+)/);
+    return m?.[1] ?? null;
+  })();
+  const projectId = currentProjectId ?? fallbackProjectId;
+  const queryClient = useQueryClient();
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [shotFeedback, setShotFeedback] = useState('');
+  const [shotSuggestion, setShotSuggestion] = useState<Record<string, unknown> | null>(null);
+  const [shotProposal, setShotProposal] = useState<Proposal | null>(null);
+  const [shotContext, setShotContext] = useState<string>('');
+  const [isApplyingShotPrompt, setIsApplyingShotPrompt] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const selectedAssetId = useSelectionStore(s => s.selectedAssetId);
   const selectedWorkflowId = useSelectionStore(s => s.selectedWorkflowId);
   const selectedNodeId = useSelectionStore(s => s.selectedWorkflowNodeId);
+  const selectedShotId = useSelectionStore(s => s.selectedShotId);
+  const selectedShotPlanAssetId = useSelectionStore(s => s.selectedShotPlanAssetId);
   const { draft } = useDraftStore();
 
   const activeNode = draft?.nodes.find(n => n.id === selectedNodeId);
@@ -73,6 +96,8 @@ export function CopilotPanel() {
           projectId,
           workflowId: selectedWorkflowId || undefined,
           assetId: selectedAssetId || undefined,
+          shotId: selectedShotId || undefined,
+          shotPlanAssetId: selectedShotPlanAssetId || undefined,
           selectedNode: activeNode
             ? {
                 id: activeNode.id,
@@ -90,6 +115,17 @@ export function CopilotPanel() {
         );
 
         const result = skillResult as SkillResult | null;
+
+        if (intent.skillName === 'improveShotPrompt' && result?.success) {
+          const data = (result.data ?? {}) as Record<string, unknown>;
+          const suggestion = (data.suggestion ?? null) as Record<string, unknown> | null;
+          const ctx = typeof data.context === 'string' ? data.context : '';
+          if (suggestion) {
+            setShotSuggestion(suggestion);
+            setShotProposal(result.proposal ?? null);
+            setShotContext(ctx);
+          }
+        }
 
         if (result?.success && result.action) {
           if (result.action.type === 'navigate') {
@@ -179,11 +215,245 @@ export function CopilotPanel() {
     handleSend(input);
   };
 
+  const hasShotFocus = Boolean(projectId && selectedShotId);
+  const canUseShotPromptCopilot = Boolean(hasShotFocus && selectedShotPlanAssetId);
+
+  const handleGenerateShotPromptSuggestion = async () => {
+    if (!projectId || !selectedShotId || !selectedShotPlanAssetId) return;
+    if (isLoading) return;
+
+    setIsLoading(true);
+    try {
+      const context = {
+        projectId,
+        workflowId: selectedWorkflowId || undefined,
+        assetId: selectedAssetId || undefined,
+        shotId: selectedShotId,
+        shotPlanAssetId: selectedShotPlanAssetId,
+        selectedNode: activeNode
+          ? {
+              id: activeNode.id,
+              type: activeNode.type,
+              label: activeNode.label || activeNode.id,
+              params: activeNode.params,
+            }
+          : undefined,
+      };
+
+      const { skillResult } = await executeSkill(
+        'improveShotPrompt',
+        context,
+        shotFeedback.trim() || 'The last generated image does not match the intended shot. Improve the prompt.'
+      );
+
+      const result = skillResult as SkillResult | null;
+      if (!result?.success) {
+        showToast({ type: 'error', title: 'Suggestion failed', message: result?.message || 'Failed.' });
+        return;
+      }
+
+      const data = (result.data ?? {}) as Record<string, unknown>;
+      const suggestion = (data.suggestion ?? null) as Record<string, unknown> | null;
+      const ctx = typeof data.context === 'string' ? data.context : '';
+
+      if (!suggestion) {
+        showToast({ type: 'error', title: 'Suggestion missing', message: 'No suggestion returned.' });
+        return;
+      }
+
+      setShotSuggestion(suggestion);
+      setShotProposal(result.proposal ?? null);
+      setShotContext(ctx);
+      showToast({ type: 'success', title: 'Suggestion ready', message: 'Review and apply if it looks good.' });
+    } catch (err) {
+      showToast({
+        type: 'error',
+        title: 'Suggestion failed',
+        message: err instanceof Error ? err.message : 'Unknown error',
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleApplyShotPromptSuggestion = async () => {
+    if (!projectId || !selectedShotId || !selectedShotPlanAssetId) return;
+    if (!shotSuggestion) return;
+
+    const prompt = typeof shotSuggestion.prompt === 'string' ? shotSuggestion.prompt.trim() : '';
+    const negativePrompt =
+      typeof shotSuggestion.negative_prompt === 'string' ? shotSuggestion.negative_prompt.trim() : '';
+    const promptStructured =
+      typeof shotSuggestion.prompt_structured === 'string' ? shotSuggestion.prompt_structured.trim() : '';
+
+    if (!prompt) {
+      showToast({ type: 'error', title: 'Missing prompt', message: 'No prompt to apply.' });
+      return;
+    }
+
+    setIsApplyingShotPrompt(true);
+    try {
+      const planAsset = await fetchAsset(selectedShotPlanAssetId);
+      if (
+        shotProposal?.kind === 'asset_patch' &&
+        shotProposal.baseAssetVersionId &&
+        planAsset.current_asset_version_id !== shotProposal.baseAssetVersionId
+      ) {
+        showToast({
+          type: 'warning',
+          title: 'Shot plan changed',
+          message: 'The shot plan updated since the suggestion was generated. Re-generate if results look wrong.',
+        });
+      }
+
+      const parsed = parseShotPlanForEdit(planAsset);
+      if (!parsed) {
+        showToast({ type: 'error', title: 'Unsupported plan', message: 'This shot plan cannot be edited.' });
+        return;
+      }
+
+      const plan = JSON.parse(JSON.stringify(parsed.plan ?? {})) as Record<string, unknown>;
+      ensureShotIdsInPlan(plan, planAsset.id);
+      const located = locateShotInPlan(plan, selectedShotId);
+      if (!located) {
+        showToast({ type: 'error', title: 'Shot not found', message: 'Could not find the selected shot in the plan.' });
+        return;
+      }
+
+      const image = {
+        prompt_structured: promptStructured || undefined,
+        prompt,
+        negative_prompt: negativePrompt || undefined,
+        width: 1280,
+        height: 720,
+        last_updated_by: 'copilot',
+        last_updated_at: new Date().toISOString(),
+      };
+
+      updateShotImageOverrideInPlan(plan, located, image);
+      const nextContent = writeBackShotPlan(parsed, plan);
+
+      await createAssetVersion(planAsset.id, {
+        content: nextContent,
+        source_mode: 'copilot',
+        status: 'draft',
+        make_current: true,
+      });
+
+      queryClient.invalidateQueries({ queryKey: ['project-assets', projectId, 'shot'] });
+      showToast({ type: 'success', title: 'Applied', message: 'Saved a new shot plan version.' });
+    } catch (err) {
+      showToast({
+        type: 'error',
+        title: 'Apply failed',
+        message: err instanceof Error ? err.message : 'Unknown error',
+      });
+    } finally {
+      setIsApplyingShotPrompt(false);
+    }
+  };
+
   return (
     <div className="flex flex-col h-full overflow-hidden">
       <h3 className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[var(--text-muted)] mb-3 shrink-0">
         AI Copilot
       </h3>
+
+      {projectId && (
+        <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-input)] p-3 text-xs mb-3 shrink-0 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[var(--text-muted)]">
+              Shot Prompt
+            </div>
+            <div className="text-[10px] text-[var(--text-muted)] truncate max-w-[180px]">
+              {selectedShotId || 'No shot selected'}
+            </div>
+          </div>
+
+          {!hasShotFocus && (
+            <div className="text-[11px] text-[var(--text-muted)]">
+              Select a shot in the Shots page, then click “Improve Prompt (Copilot)”.
+            </div>
+          )}
+
+          {hasShotFocus && !canUseShotPromptCopilot && (
+            <div className="text-[11px] text-[var(--text-muted)]">
+              Select a shot plan/shot in the Shots page to enable prompt improvement.
+            </div>
+          )}
+
+          <textarea
+            value={shotFeedback}
+            onChange={e => setShotFeedback(e.target.value)}
+            placeholder='What’s wrong with the last image? (e.g. "Looks like a city street; should be overcast grassland")'
+            rows={3}
+            className="w-full px-2.5 py-2 text-xs rounded border border-[var(--border)] bg-[var(--bg-hover)] text-[var(--text-primary)] outline-none focus:border-[var(--accent)] resize-none"
+            disabled={isLoading || !canUseShotPromptCopilot}
+          />
+
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={handleGenerateShotPromptSuggestion}
+              disabled={isLoading || !canUseShotPromptCopilot}
+              className="px-3 py-1.5 rounded bg-[var(--accent)] text-white text-xs font-medium hover:opacity-90 disabled:opacity-40"
+            >
+              {isLoading ? 'Generating…' : 'Generate Suggestion'}
+            </button>
+            <button
+              type="button"
+              onClick={handleApplyShotPromptSuggestion}
+              disabled={!shotSuggestion || isApplyingShotPrompt || !canUseShotPromptCopilot}
+              className="px-3 py-1.5 rounded bg-[var(--bg-hover)] border border-[var(--border)] text-[var(--text-primary)] text-xs font-medium hover:border-[var(--accent)] disabled:opacity-40"
+            >
+              {isApplyingShotPrompt ? 'Applying…' : 'Apply'}
+            </button>
+          </div>
+
+          {shotSuggestion && (
+            <details className="pt-1">
+              <summary className="cursor-pointer text-[11px] font-semibold text-[var(--text-muted)] uppercase">
+                Suggestion
+              </summary>
+              <div className="mt-2 space-y-2">
+                <div>
+                  <div className="text-[10px] font-medium text-[var(--text-muted)]">Prompt (structured)</div>
+                  <pre className="mt-1 whitespace-pre-wrap text-[11px] text-[var(--text-primary)]">
+                    {typeof shotSuggestion.prompt_structured === 'string'
+                      ? shotSuggestion.prompt_structured
+                      : ''}
+                  </pre>
+                </div>
+                <div>
+                  <div className="text-[10px] font-medium text-[var(--text-muted)]">Prompt (sent to generator)</div>
+                  <pre className="mt-1 whitespace-pre-wrap text-[11px] text-[var(--text-primary)]">
+                    {typeof shotSuggestion.prompt === 'string' ? shotSuggestion.prompt : ''}
+                  </pre>
+                </div>
+                <div>
+                  <div className="text-[10px] font-medium text-[var(--text-muted)]">Negative prompt</div>
+                  <pre className="mt-1 whitespace-pre-wrap text-[11px] text-[var(--text-primary)]">
+                    {typeof shotSuggestion.negative_prompt === 'string'
+                      ? shotSuggestion.negative_prompt
+                      : ''}
+                  </pre>
+                </div>
+              </div>
+            </details>
+          )}
+
+          {shotContext && (
+            <details>
+              <summary className="cursor-pointer text-[11px] font-semibold text-[var(--text-muted)] uppercase">
+                Context Used
+              </summary>
+              <pre className="mt-2 whitespace-pre-wrap text-[11px] text-[var(--text-muted)]">
+                {shotContext}
+              </pre>
+            </details>
+          )}
+        </div>
+      )}
 
       <div className="flex-1 overflow-y-auto mb-4 pr-1 space-y-3">
         {messages.length === 0 ? (

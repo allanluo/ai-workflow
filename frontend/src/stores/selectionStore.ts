@@ -9,6 +9,7 @@ interface SelectionState {
   selectedOutputId: string | null;
   selectedOutputVersionId: string | null;
   selectedShotId: string | null;
+  selectedShotPlanAssetId: string | null;
   selectedSceneId: string | null;
   selectedFileId: string | null;
   selectedWorkflowNodeId: string | null;
@@ -19,7 +20,8 @@ interface SelectionActions {
   selectWorkflow: (workflowId: string, versionId?: string | null) => void;
   selectWorkflowRun: (runId: string) => void;
   selectOutput: (outputId: string, versionId?: string | null) => void;
-  selectShot: (shotId: string) => void;
+  selectShot: (shotId: string, shotPlanAssetId?: string | null) => void;
+  selectShotPlan: (assetId: string | null) => void;
   selectScene: (sceneId: string) => void;
   selectFile: (fileId: string) => void;
   selectWorkflowNode: (nodeId: string | null) => void;
@@ -38,6 +40,7 @@ export const useSelectionStore = create<SelectionState & SelectionActions>()(set
   selectedOutputId: null,
   selectedOutputVersionId: null,
   selectedShotId: null,
+  selectedShotPlanAssetId: null,
   selectedSceneId: null,
   selectedFileId: null,
   selectedWorkflowNodeId: null,
@@ -62,7 +65,10 @@ export const useSelectionStore = create<SelectionState & SelectionActions>()(set
       selectedOutputVersionId: versionId,
     }),
 
-  selectShot: shotId => set({ selectedShotId: shotId }),
+  selectShot: (shotId, shotPlanAssetId = null) =>
+    set({ selectedShotId: shotId, selectedShotPlanAssetId: shotPlanAssetId }),
+
+  selectShotPlan: assetId => set({ selectedShotPlanAssetId: assetId }),
 
   selectScene: sceneId => set({ selectedSceneId: sceneId }),
 
@@ -80,6 +86,7 @@ export const useSelectionStore = create<SelectionState & SelectionActions>()(set
       selectedOutputId: null,
       selectedOutputVersionId: null,
       selectedShotId: null,
+      selectedShotPlanAssetId: null,
       selectedSceneId: null,
       selectedFileId: null,
       selectedWorkflowNodeId: null,

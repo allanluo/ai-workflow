@@ -19,7 +19,12 @@ export function Shell({ children }: ShellProps) {
   const { sidebarCollapsed } = useAppStore();
 
   const sidebarWidth = projectId ? (sidebarCollapsed ? 56 : 240) : sidebarCollapsed ? 56 : 240;
-  const rightPanelActualWidth = rightPanelOpen ? rightPanelWidth : 0;
+  const clampPanelWidth = (value: number) => Math.max(280, Math.min(600, value));
+  const safeRightPanelWidth =
+    typeof rightPanelWidth === 'number' && Number.isFinite(rightPanelWidth)
+      ? clampPanelWidth(rightPanelWidth)
+      : 360;
+  const rightPanelActualWidth = rightPanelOpen ? safeRightPanelWidth : 0;
 
   return (
     <div className="h-screen w-screen overflow-hidden bg-[var(--bg-base)] flex flex-col">

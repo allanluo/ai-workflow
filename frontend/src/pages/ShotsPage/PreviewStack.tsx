@@ -11,6 +11,7 @@ import {
   type JobStatus,
 } from '../../lib/api';
 import { showToast } from '../../stores';
+import { usePanelStore, useSelectionStore } from '../../stores';
 
 interface PreviewStackProps {
   projectId: string;
@@ -44,6 +45,8 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
   const [videoJobByShotId, setVideoJobByShotId] = useState<Record<string, string>>({});
   const [videoJobStatusByShotId, setVideoJobStatusByShotId] = useState<Record<string, string>>({});
   const [hydratedForProjectId, setHydratedForProjectId] = useState<string | null>(null);
+  const setRightPanelTab = usePanelStore(s => s.setRightPanelTab);
+  const selectShot = useSelectionStore(s => s.selectShot);
 
   const imageUrl = imageByShotId[shot.id] || '';
   const videoUrl = videoByShotId[shot.id] || '';
@@ -316,7 +319,7 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
     };
   }, [effectivePrompt, latestCanonAsset]);
 
-  const generationPrompt = useMemo(() => {
+  const assembledPrompt = useMemo(() => {
     const lines: string[] = [];
     lines.push('CANON:');
     if (canonInfo) {
@@ -371,6 +374,21 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
 
     return lines.join('\n').trim();
   }, [canonInfo, sceneInfo, shot]);
+
+  const generationPrompt = useMemo(() => {
+    const override = (shot.generatorPrompt || '').trim();
+    return override || assembledPrompt;
+  }, [assembledPrompt, shot.generatorPrompt]);
+
+  const promptDisplay = useMemo(() => {
+    const structured = (shot.generatorPromptStructured || '').trim();
+    const negative = (shot.generatorNegativePrompt || '').trim();
+    const parts: string[] = [];
+    if (structured) parts.push(structured);
+    if (negative) parts.push(`NEGATIVE_PROMPT:\n${negative}`);
+    parts.push(`SENT_PROMPT:\n${generationPrompt}`);
+    return parts.join('\n\n').trim();
+  }, [generationPrompt, shot.generatorNegativePrompt, shot.generatorPromptStructured]);
 
   const handleGenerate = async () => {
     if (!canGenerate) return;
@@ -705,7 +723,29 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
         <summary className="cursor-pointer text-xs font-semibold text-comfy-muted uppercase">
           Prompt (sent to generator)
         </summary>
-        <pre className="mt-2 whitespace-pre-wrap text-xs text-comfy-text">{generationPrompt}</pre>
+        <div className="mt-2 flex items-center justify-end">
+          <button
+            type="button"
+            className="comfy-btn-secondary text-xs"
+            onClick={() => {
+              // Ensure Copilot has a deterministic focus target even if the user didn't explicitly click in the list.
+              if (shot?.id && shot?.planId) {
+                selectShot(shot.id, shot.planId);
+              } else {
+                showToast({
+                  type: 'warning',
+                  title: 'Select a shot',
+                  message: 'Select a shot in the list first, then improve its prompt.',
+                });
+              }
+              setRightPanelTab('copilot');
+            }}
+            title="Open Copilot to improve this shot prompt"
+          >
+            Improve Prompt (Copilot)
+          </button>
+        </div>
+        <pre className="mt-2 whitespace-pre-wrap text-xs text-comfy-text">{promptDisplay}</pre>
       </details>
 
       {/* Preview Content */}

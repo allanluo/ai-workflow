@@ -41,6 +41,29 @@ This design is inspired by Cursor's architecture, adapted for video production.
 
 ---
 
+## Design Principles (Code Assistant Parity)
+
+To be “like a code assistant”, Copilot should follow the same core interaction contract:
+
+1) **Focus-first context**
+   - Always operate on a clearly identified “active target” (like an active file in an IDE).
+   - In this product the focus target is typically: `projectId` + (`workflowId` | `assetId` | `shotPlanAssetId` + `shotId` | `sceneAssetId` + index).
+
+2) **Propose → Review → Apply**
+   - The default mode should be to **propose changes** (a patch) and let the user apply them.
+   - Applying changes should be explicit and versioned (new workflow version / new asset version).
+
+3) **Deterministic tools, validated outputs**
+   - Tools must be typed and idempotent where possible.
+   - LLM outputs that the UI consumes must be schema-validated (strict JSON).
+
+4) **Traceability**
+   - Every applied change should record: the focus target, context snapshot/version ids, the model+prompt (or hash), and the resulting patch.
+
+These principles keep the architecture consistent with Cursor/Claude Code style “agentic editing” and prevent hidden state drift.
+
+---
+
 ## Complete Architecture
 
 ```
@@ -145,13 +168,23 @@ interface CopilotContext {
     workflowId?: string;
     assetId?: string;
     nodeId?: string;
+    shotPlanAssetId?: string;
+    shotId?: string;
+    sceneAssetId?: string;
+    sceneIndex?: number;
+  };
+  // Important: pin versions to prevent “drift” during multi-step execution.
+  pinned: {
+    workflowVersionId?: string;
+    assetVersionId?: string;
+    shotPlanAssetVersionId?: string;
   };
   conversation: ChatMessage[];
 }
 
 class ContextEngine {
   async buildContext(projectId: string, query: string): Promise<string> {
-    // 1. Fetch all project data in parallel
+    // 1. Fetch baseline project data (cache + incremental refresh in production)
     const [project, assets, workflows, runs] = await Promise.all([
       fetchProject(projectId),
       fetchProjectAssets(projectId),
@@ -176,6 +209,11 @@ class ContextEngine {
     // - Semantic search on titles/content
     // - Keyword matching
     // - Recent items priority
+    //
+    // NOTE: early MVP can start with deterministic retrieval:
+    // - prefer the user’s focused selection
+    // - plus the most recent canon/scenes/shots assets
+    // - plus the last N runs
   }
 }
 ```
@@ -262,6 +300,7 @@ Executes tools in sequence or parallel, handles dependencies.
 - Result aggregation
 - Error handling with retry
 - Verification of results
+ - Patch application (explicit apply step)
 
 **Execution Flow:**
 
@@ -350,6 +389,47 @@ Interface to LLM for planning and conversation.
 
 Tools are the atomic capabilities the Copilot can execute, categorized by function.
 
+### Tools vs Skills (important)
+
+- **Tools** are atomic operations with a stable, typed contract (like “read file”, “apply patch”, “run tests”).
+- **Skills** are small orchestrations built on top of tools (like “refactor function”, “improve shot prompt”, “generate shot plan”).
+- The **Planner** chooses a tool sequence or a skill, but the UI should receive a structured result either way.
+
+This mirrors code assistants:
+
+- *Tool* ≈ low-level editor/FS/process capability
+- *Skill* ≈ a product-level workflow that composes tools
+
+### Proposal / Patch Protocol (Propose → Review → Apply)
+
+To keep Copilot behavior consistent with a code assistant, any “write” should usually be a **proposal** first:
+
+```ts
+type Proposal =
+  | {
+      kind: 'asset_patch';
+      assetId: string;
+      baseAssetVersionId?: string;
+      summary: string;
+      // Prefer JSON Patch (RFC 6902) so the UI can preview diffs safely.
+      patch: Array<{ op: 'add' | 'remove' | 'replace'; path: string; value?: unknown }>;
+    }
+  | {
+      kind: 'workflow_patch';
+      workflowId: string;
+      baseWorkflowVersionId?: string;
+      summary: string;
+      patch: Array<{ op: 'add' | 'remove' | 'replace'; path: string; value?: unknown }>;
+    };
+```
+
+Apply step:
+
+- For assets: create a new asset version (`source_mode: 'copilot'`, `make_current: true`)
+- For workflows: create a new workflow version (or draft update) with a pinned base version id
+
+This gives us previewability, undo (revert version), and traceability.
+
 ### READ Tools
 
 | Tool             | Description          | Parameters        |
@@ -389,7 +469,7 @@ Tools are the atomic capabilities the Copilot can execute, categorized by functi
 ### Adding New Tools
 
 ```typescript
-// frontend/src/lib/agent/tools/myTool.ts
+// frontend/src/lib/agent/tools/myTool.ts (planned)
 import type { Tool, ToolContext, ToolResult } from '../types';
 
 export const myTool: Tool = {
@@ -411,6 +491,12 @@ export const myTool: Tool = {
   }
 };
 ```
+
+NOTE: The current codebase already has a `frontend/src/lib/agent/skills/` folder.
+The recommended direction is:
+
+- Add a `tools/` registry for atomic operations
+- Refactor skills to compose tools (so skills stay thin and testable)
 
 ---
 
@@ -678,3 +764,4 @@ Why this first:
 Design details and proposed data model live in:
 
 - `docs/copilot_shot_prompt_design.md`
+- `docs/copilot_agentic_implementation_plan.md`

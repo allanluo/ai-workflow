@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { createAssetVersion, fetchProjectAssets, type Asset } from '../../lib/api';
+import { ensureShotIdsInPlan, parseShotPlanForEdit, writeBackShotPlan } from '../../lib/shotPlanEditing';
 import { ShotListPanel } from './ShotListPanel';
 import { ShotEditor } from './ShotEditor';
 import { PreviewStack } from './PreviewStack';
 import { ShotToolbar } from './ShotToolbar';
 import { showToast } from '../../stores';
+import { useSelectionStore } from '../../stores';
 
 interface ShotsPageProps {
   projectId: string;
@@ -25,6 +27,9 @@ interface Shot {
   angle: string;
   motion: string;
   duration: number;
+  generatorPrompt?: string;
+  generatorNegativePrompt?: string;
+  generatorPromptStructured?: string;
 }
 
 type ShotPlanItem = {
@@ -36,25 +41,17 @@ type ShotPlanItem = {
   motion?: string;
   continuityNotes?: string;
   sceneTitle?: string;
+  image?: {
+    prompt_structured?: string;
+    prompt?: string;
+    negative_prompt?: string;
+  };
 };
 
 type ShotPlanScene = {
   title?: string;
   shots?: ShotPlanItem[];
 };
-
-type ParsedShotPlanForEdit =
-  | {
-      mode: 'direct';
-      wrapper: Record<string, unknown>;
-      plan: Record<string, unknown>;
-    }
-  | {
-      mode: 'wrapped';
-      wrapper: Record<string, unknown>;
-      wrapperKey: '_raw' | 'text';
-      plan: Record<string, unknown>;
-    };
 
 function normalizeSpaceCase(value: string) {
   return value
@@ -127,82 +124,6 @@ function extractShotPlanItems(asset: Asset): ShotPlanItem[] {
   }
 }
 
-function parseShotPlanForEdit(asset: Asset): ParsedShotPlanForEdit | null {
-  const raw = (asset.current_version?.content ?? {}) as Record<string, unknown>;
-
-  const hasDirectPlan = (obj: unknown) => {
-    if (!obj || typeof obj !== 'object') return false;
-    const record = obj as Record<string, unknown>;
-    return Array.isArray(record.scenes) || Array.isArray(record.shots);
-  };
-
-  if (hasDirectPlan(raw)) {
-    return { mode: 'direct', wrapper: raw, plan: raw };
-  }
-
-  const wrapperKey: '_raw' | 'text' | undefined =
-    typeof raw._raw === 'string' ? '_raw' : typeof raw.text === 'string' ? 'text' : undefined;
-  if (!wrapperKey) return null;
-  const rawText = raw[wrapperKey];
-  if (typeof rawText !== 'string' || !rawText) return null;
-
-  try {
-    const parsed = JSON.parse(rawText) as unknown;
-    if (!hasDirectPlan(parsed)) return null;
-    return { mode: 'wrapped', wrapper: raw, wrapperKey, plan: parsed as Record<string, unknown> };
-  } catch {
-    return null;
-  }
-}
-
-function writeBackShotPlan(parsed: ParsedShotPlanForEdit, nextPlan: Record<string, unknown>) {
-  if (parsed.mode === 'direct') {
-    return {
-      ...(parsed.wrapper ?? {}),
-      ...(nextPlan ?? {}),
-    } as Record<string, unknown>;
-  }
-
-  return {
-    ...(parsed.wrapper ?? {}),
-    [parsed.wrapperKey]: JSON.stringify(nextPlan ?? {}, null, 2),
-  } as Record<string, unknown>;
-}
-
-function ensureShotIdsInPlan(plan: Record<string, unknown>, planId: string) {
-  let flatIndex = 0;
-
-  const ensureShotId = (shot: ShotPlanItem) => {
-    if (!shot || typeof shot !== 'object') return;
-    if (typeof shot.id === 'string' && shot.id.trim()) return;
-    shot.id = `${planId}:${flatIndex}`;
-  };
-
-  const scenesRaw = plan.scenes;
-  if (Array.isArray(scenesRaw)) {
-    for (const scene of scenesRaw) {
-      if (!scene || typeof scene !== 'object') continue;
-      const shots = (scene as Record<string, unknown>).shots;
-      if (!Array.isArray(shots)) continue;
-      for (const shot of shots) {
-        if (!shot || typeof shot !== 'object') continue;
-        ensureShotId(shot as ShotPlanItem);
-        flatIndex += 1;
-      }
-    }
-    return;
-  }
-
-  const shotsRaw = plan.shots;
-  if (Array.isArray(shotsRaw)) {
-    for (const shot of shotsRaw) {
-      if (!shot || typeof shot !== 'object') continue;
-      ensureShotId(shot as ShotPlanItem);
-      flatIndex += 1;
-    }
-  }
-}
-
 function makeNewShotId(planId: string) {
   return `${planId}:manual:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 }
@@ -226,6 +147,8 @@ function nextShotNumber(shots: ShotPlanItem[]) {
 
 export function ShotsPage({ projectId }: ShotsPageProps) {
   const queryClient = useQueryClient();
+  const selectShot = useSelectionStore(s => s.selectShot);
+  const selectShotPlan = useSelectionStore(s => s.selectShotPlan);
   const [selectedShotId, setSelectedShotId] = useState<string | null>(null);
   const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null);
 
@@ -267,6 +190,13 @@ export function ShotsPage({ projectId }: ShotsPageProps) {
         const continuityNotes =
           typeof item.continuityNotes === 'string' ? item.continuityNotes : '';
         const sceneTitle = typeof item.sceneTitle === 'string' ? item.sceneTitle : '';
+        const imageObj =
+          item.image && typeof item.image === 'object' ? (item.image as Record<string, unknown>) : null;
+        const generatorPrompt = imageObj && typeof imageObj.prompt === 'string' ? imageObj.prompt : '';
+        const generatorNegativePrompt =
+          imageObj && typeof imageObj.negative_prompt === 'string' ? imageObj.negative_prompt : '';
+        const generatorPromptStructured =
+          imageObj && typeof imageObj.prompt_structured === 'string' ? imageObj.prompt_structured : '';
 
         return {
           id: stableId,
@@ -287,6 +217,9 @@ export function ShotsPage({ projectId }: ShotsPageProps) {
           angle,
           motion,
           duration: 0,
+          generatorPrompt: generatorPrompt || undefined,
+          generatorNegativePrompt: generatorNegativePrompt || undefined,
+          generatorPromptStructured: generatorPromptStructured || undefined,
         };
       })
     : [];
@@ -296,8 +229,9 @@ export function ShotsPage({ projectId }: ShotsPageProps) {
     if (!selectedPlanId || !shotPlans.some(p => p.id === selectedPlanId)) {
       setSelectedPlanId(shotPlans[0].id);
       setSelectedShotId(null);
+      selectShotPlan(shotPlans[0].id);
     }
-  }, [shotPlans, selectedPlanId]);
+  }, [shotPlans, selectedPlanId, selectShotPlan]);
 
   useEffect(() => {
     // When plan changes, reset shot selection so the first shot is shown.
@@ -322,11 +256,22 @@ export function ShotsPage({ projectId }: ShotsPageProps) {
       duration: 0,
     };
 
+  useEffect(() => {
+    if (!selectedPlan) return;
+    if (!selectedShot.id) return;
+    selectShot(selectedShot.id, selectedPlan.id);
+  }, [selectShot, selectedPlan, selectedShot.id]);
+
   const handleSelectPlan = (planId: string) => {
     setSelectedPlanId(planId);
+    selectShotPlan(planId);
   };
 
-  const handleSelectShot = (shotId: string) => setSelectedShotId(shotId);
+  const handleSelectShot = (shotId: string) => {
+    setSelectedShotId(shotId);
+    const planId = selectedPlan?.id ?? selectedPlanId ?? null;
+    if (planId) selectShot(shotId, planId);
+  };
 
   const updatePlanMutation = useMutation({
     mutationFn: async (input: { planAssetId: string; content: Record<string, unknown> }) => {

@@ -2,6 +2,8 @@ export interface SkillContext {
   projectId: string;
   workflowId?: string;
   assetId?: string;
+  shotPlanAssetId?: string;
+  shotId?: string;
   selectedNode?: {
     id: string;
     type: string;
@@ -10,10 +12,25 @@ export interface SkillContext {
   };
 }
 
+export type JsonPatchOperation =
+  | { op: 'add' | 'replace'; path: string; value: unknown }
+  | { op: 'remove'; path: string };
+
+export type Proposal =
+  | {
+      kind: 'asset_patch';
+      assetId: string;
+      baseAssetVersionId?: string | null;
+      summary: string;
+      patch: JsonPatchOperation[];
+      metadata?: Record<string, unknown>;
+    };
+
 export interface SkillResult {
   success: boolean;
   message: string;
   data?: unknown;
+  proposal?: Proposal;
   action?: {
     type: 'create_workflow' | 'navigate' | 'refresh' | 'show_modal';
     payload?: unknown;
@@ -34,4 +51,10 @@ export interface ParsedIntent {
   parameters?: Record<string, unknown>;
 }
 
-export type SkillName = 'createWorkflow' | 'addScene' | 'explainNode' | 'generateShots' | 'chat';
+export type SkillName =
+  | 'createWorkflow'
+  | 'addScene'
+  | 'improveShotPrompt'
+  | 'explainNode'
+  | 'generateShots'
+  | 'chat';

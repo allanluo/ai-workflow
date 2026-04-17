@@ -47,6 +47,26 @@ export const usePanelStore = create<PanelState & PanelActions>()(
     }),
     {
       name: 'ai-workflow-panels',
+      merge: (persisted, current) => {
+        const persistedState = (persisted ?? {}) as Partial<PanelState>;
+
+        const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+        const safeWidth =
+          typeof persistedState.rightPanelWidth === 'number' && Number.isFinite(persistedState.rightPanelWidth)
+            ? clamp(persistedState.rightPanelWidth, 280, 600)
+            : current.rightPanelWidth;
+        const safeBottomHeight =
+          typeof persistedState.bottomDockHeight === 'number' && Number.isFinite(persistedState.bottomDockHeight)
+            ? clamp(persistedState.bottomDockHeight, 150, 400)
+            : current.bottomDockHeight;
+
+        return {
+          ...current,
+          ...persistedState,
+          rightPanelWidth: safeWidth,
+          bottomDockHeight: safeBottomHeight,
+        };
+      },
     }
   )
 );
