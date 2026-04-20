@@ -16,8 +16,6 @@ function RunsTab() {
   const { pathname } = useLocation();
   const projectId = pathname.match(/\/projects\/([^\/]+)/)?.[1];
 
-  console.log('ActivityDock projectId:', projectId, 'pathname:', pathname);
-
   const runsQuery = useQuery({
     queryKey: ['project-runs', projectId],
     queryFn: () => (projectId ? fetchProjectWorkflowRuns(projectId) : Promise.resolve([])),
@@ -32,7 +30,6 @@ function RunsTab() {
   });
 
   const runs = runsQuery.data ?? [];
-  console.log('ActivityDock runs:', runs.length, 'first run:', runs[0]?.id);
   const workflows = workflowsQuery.data ?? [];
 
   // Create a quick lookup map from workflow_version_id to workflow title

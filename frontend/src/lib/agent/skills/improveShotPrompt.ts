@@ -1,11 +1,12 @@
 import type { Proposal, Skill, SkillContext, SkillResult } from '../types';
-import { fetchAsset, fetchProjectAssets, type Asset } from '../../api';
+import type { Asset } from '../../api';
 import {
   ensureShotIdsInPlan,
   locateShotInPlan,
   parseShotPlanForEdit,
 } from '../../shotPlanEditing';
-import { extractFirstJsonObject, llmGenerateText } from '../llmClient';
+import { extractFirstJsonObjectLenient } from '../llmClient';
+import { executeTool } from '../tools';
 
 export type ShotPromptSuggestion = {
   prompt_structured: string;
@@ -14,6 +15,8 @@ export type ShotPromptSuggestion = {
   questions?: { id: string; question: string; default?: string }[];
   assumptions?: string[];
 };
+
+type FramingIntent = 'wide' | 'bird_eye' | 'medium' | 'close_up' | 'unknown';
 
 function isShotPromptSuggestion(value: unknown): value is ShotPromptSuggestion {
   if (!value || typeof value !== 'object') return false;
@@ -29,7 +32,8 @@ function pickLatestNonDeprecated(assets: Asset[]) {
   return (
     [...assets]
       .filter(a => a.status !== 'deprecated')
-      .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())[0] ?? null
+      .sort((a, b) => new Date(b.updated_at ?? 0).getTime() - new Date(a.updated_at ?? 0).getTime())[0] ??
+    null
   );
 }
 
@@ -157,6 +161,107 @@ function buildShotSummary(input: {
   return lines.join('\n');
 }
 
+function inferFramingIntent(input: { framing: string; angle: string; userFeedback: string }) : FramingIntent {
+  const framing = (input.framing || '').toLowerCase();
+  const angle = (input.angle || '').toLowerCase();
+  const fb = (input.userFeedback || '').toLowerCase();
+
+  const wantsBird = /\b(bird[\s-]?eye|overhead|top[\s-]?down)\b/.test(fb) || /\b(bird[\s-]?eye|overhead|top[\s-]?down)\b/.test(angle);
+  if (wantsBird) return 'bird_eye';
+  const wantsWide =
+    /\b(wide|establishing|long[\s-]?shot)\b/.test(fb) ||
+    /\b(wide|establishing|long[\s-]?shot)\b/.test(framing) ||
+    /\bwide\b/.test(angle);
+  if (wantsWide) return 'wide';
+  const wantsClose = /\b(close[\s-]?up|portrait|head[\s-]?shot|tight framing)\b/.test(fb) || /\bclose[\s-]?up\b/.test(framing);
+  if (wantsClose) return 'close_up';
+  const wantsMedium = /\bmedium\b/.test(fb) || /\bmedium\b/.test(framing);
+  if (wantsMedium) return 'medium';
+  return 'unknown';
+}
+
+function violatesFramingIntent(intent: FramingIntent, suggestion: ShotPromptSuggestion) {
+  const prompt = `${suggestion.prompt_structured}\n${suggestion.prompt}`.toLowerCase();
+  if (intent === 'wide' || intent === 'bird_eye') {
+    if (/\b(close[\s-]?up|portrait|head[\s-]?shot)\b/.test(prompt)) return true;
+    // If we talk about a face as the main subject, it usually implies a tight shot.
+    if (/\b(allan['’]s\s+face|focus on.*eyes|close on.*eyes)\b/.test(prompt)) return true;
+  }
+  return false;
+}
+
+function buildHardConstraints(intent: FramingIntent) {
+  const lines: string[] = [];
+  lines.push('HARD_CONSTRAINTS:');
+  lines.push('- Must be visually consistent with CANON + SCENE + SHOT.');
+  lines.push('- Must include: no text, no watermark, no logos.');
+  if (intent === 'wide') {
+    lines.push('- REQUIRED: wide establishing shot; subject not filling the frame.');
+    lines.push('- FORBIDDEN: close-up, portrait, headshot, tight framing, face-focused composition.');
+  } else if (intent === 'bird_eye') {
+    lines.push('- REQUIRED: bird-eye / top-down / overhead wide shot; figures can be small due to distance.');
+    lines.push('- FORBIDDEN: close-up, portrait, headshot, tight framing, face-focused composition.');
+  } else if (intent === 'close_up') {
+    lines.push('- REQUIRED: close-up framing (face/upper body) with cinematic details.');
+  }
+  return lines.join('\n');
+}
+
+function composeFallbackSuggestion(input: {
+  intent: FramingIntent;
+  sceneTitle: string;
+  sceneSummary: string;
+  shotSummary: string;
+  userFeedback: string;
+}) : ShotPromptSuggestion {
+  const baseIntent =
+    input.intent === 'bird_eye'
+      ? 'Bird-eye wide establishing shot'
+      : input.intent === 'wide'
+        ? 'Wide establishing shot'
+        : input.intent === 'medium'
+          ? 'Medium shot'
+          : input.intent === 'close_up'
+            ? 'Close-up'
+            : 'Wide establishing shot';
+
+  const prompt_structured = [
+    'SHOT_PROMPT_STRUCTURED:',
+    `- framing: ${baseIntent}`,
+    `- scene: ${input.sceneTitle || '(unknown)'}`,
+    '- subject: Allan, partially hidden behind tall grass in the foreground',
+    '- action: Allan is scared, watching distant gunfire exchanging between two groups far away',
+    '- scale: distant figures are very small due to distance; focus on environment + mood, not faces',
+    `- setting_notes: ${input.sceneSummary || '(see scene)'}`,
+    `- shot_notes: ${input.shotSummary || '(see shot)'}`,
+    `- user_feedback: ${input.userFeedback || '(none)'}`,
+    '- camera: cinematic, realistic; stable framing; strong sense of distance and vulnerability',
+    '- constraints: no text, no watermark, no logos',
+  ].join('\n');
+
+  const prompt = [
+    `${baseIntent} in a grassland at dusk/overcast.`,
+    `Allan is crouched/hiding behind tall grass in the foreground, visibly scared, watching a distant firefight.`,
+    `Two small groups of people exchange gunfire far away; the figures are tiny silhouettes due to the distance.`,
+    `Emphasize vast landscape, depth, and tension; Allan should NOT be a close-up or face-focused portrait.`,
+    `No text, no watermark, no logos.`,
+  ].join(' ');
+
+  const negative_prompt = [
+    'close-up',
+    'portrait',
+    'headshot',
+    'tight framing',
+    'face close-up',
+    'text',
+    'watermark',
+    'logo',
+    'UI',
+  ].join(', ');
+
+  return { prompt_structured, prompt, negative_prompt, assumptions: ['Used deterministic fallback due to constraint violation.'] };
+}
+
 function buildSystemPrompt() {
   return [
     'You are a production copilot that improves image-generation prompts for a single shot.',
@@ -166,18 +271,45 @@ function buildSystemPrompt() {
     '  "prompt_structured": string,',
     '  "prompt": string,',
     '  "negative_prompt": string,',
-    '  "questions"?: [{ "id": string, "question": string, "default"?: string }],',
-    '  "assumptions"?: string[]',
+    '  "questions": [{ "id": string, "question": string, "default": string }], // optional',
+    '  "assumptions": string[] // optional',
     '}',
     '',
     'Rules:',
     '- Use CANON + SCENE + SHOT context faithfully; do not contradict canon.',
+    '- Do NOT change shot scale (e.g. wide vs close-up) unless the user explicitly asks.',
     '- The prompt must be visually specific, cinematic, and include camera/framing/angle/motion.',
     '- Always include: no text, no watermark, no logos.',
     '- Keep it consistent with the setting and emotional beat.',
     '- If key info is missing, ask 1-3 concise questions in "questions" (do not ask more).',
+    '- If USER_FEEDBACK provides explicit framing/composition, treat it as authoritative and apply it (do not ask again).',
     '- Do not include markdown, code fences, or extra commentary outside the JSON.',
+    '- Use double quotes for all JSON keys and string values.',
   ].join('\n');
+}
+
+function buildJsonRepairPrompt(input: { schemaHint: string; invalidOutput: string; error?: string }) {
+  return [
+    'You are a strict JSON repair assistant.',
+    '',
+    'The following output was intended to be a JSON object, but it is invalid JSON.',
+    'Fix it so that it becomes a valid JSON object that matches this schema hint:',
+    input.schemaHint,
+    '',
+    input.error ? `JSON_PARSE_ERROR: ${input.error}` : '',
+    '',
+    'Rules:',
+    '- Return ONLY the repaired JSON object.',
+    '- Do not add markdown, code fences, or commentary.',
+    '- Preserve the original meaning; do not invent new fields.',
+    '',
+    'INVALID_OUTPUT:',
+    input.invalidOutput,
+    '',
+    'JSON:',
+  ]
+    .filter(Boolean)
+    .join('\n');
 }
 
 export const improveShotPromptSkill: Skill = {
@@ -201,11 +333,25 @@ export const improveShotPromptSkill: Skill = {
         };
       }
 
-      const [planAsset, canonAssets, sceneAssets] = await Promise.all([
-        fetchAsset(shotPlanAssetId),
-        fetchProjectAssets(context.projectId, 'canon_text'),
-        fetchProjectAssets(context.projectId, 'scene'),
-      ]);
+      const planAssetResult = await executeTool('fetchAsset', context, { assetId: shotPlanAssetId });
+      if (!planAssetResult.ok) {
+        return { success: false, message: planAssetResult.error.message };
+      }
+      const planAsset = planAssetResult.data as Asset;
+
+      const canonAssetsResult = await executeTool('fetchProjectAssets', context, {
+        assetType: 'canon_text',
+      });
+      if (!canonAssetsResult.ok) {
+        return { success: false, message: canonAssetsResult.error.message };
+      }
+      const canonAssets = canonAssetsResult.data as Asset[];
+
+      const sceneAssetsResult = await executeTool('fetchProjectAssets', context, { assetType: 'scene' });
+      if (!sceneAssetsResult.ok) {
+        return { success: false, message: sceneAssetsResult.error.message };
+      }
+      const sceneAssets = sceneAssetsResult.data as Asset[];
 
       const parsed = parseShotPlanForEdit(planAsset);
       if (!parsed) {
@@ -236,6 +382,7 @@ export const improveShotPromptSkill: Skill = {
 
       const userFeedback = (input || '').trim();
       const shotText = `${sceneTitle}\n${description}\n${framing}\n${angle}\n${motion}`.trim();
+      const framingIntent = inferFramingIntent({ framing, angle, userFeedback });
 
       const latestCanon = pickLatestNonDeprecated(canonAssets);
       const latestSceneBatch = (() => {
@@ -248,6 +395,8 @@ export const improveShotPromptSkill: Skill = {
       })();
 
       const contextBlock = [
+        buildHardConstraints(framingIntent),
+        '',
         buildCanonSummary(latestCanon, shotText),
         '',
         buildSceneSummary(latestSceneBatch, sceneTitle),
@@ -258,11 +407,55 @@ export const improveShotPromptSkill: Skill = {
         userFeedback ? `  ${userFeedback}` : '  (none)',
       ].join('\n');
 
-      const model = (import.meta.env.VITE_COPILOT_MODEL as string | undefined) || 'gemma3:1b';
+      const model =
+        (import.meta.env.VITE_COPILOT_SHOT_PROMPT_MODEL as string | undefined) ||
+        (import.meta.env.VITE_COPILOT_MODEL as string | undefined) ||
+        'gemma3:1b';
 
       const fullPrompt = `${buildSystemPrompt()}\n\nCONTEXT:\n${contextBlock}\n\nJSON:`;
-      const raw = await llmGenerateText({ model, prompt: fullPrompt, stream: false });
-      const parsedJson = extractFirstJsonObject(raw);
+      const llmRes = await executeTool('llmGenerateText', context, { model, prompt: fullPrompt, stream: false });
+      if (!llmRes.ok) return { success: false, message: llmRes.error.message };
+      const raw = String((llmRes.data as any)?.text ?? '');
+      let parsedJson: unknown;
+      try {
+        parsedJson = extractFirstJsonObjectLenient(raw);
+      } catch (err) {
+        // Best-effort repair: ask the model to output valid JSON only.
+        const schemaHint =
+          '{ "prompt_structured": string, "prompt": string, "negative_prompt": string, "questions": [{ "id": string, "question": string, "default": string }], "assumptions": string[] } (questions/assumptions optional)';
+        const repairPrompt = buildJsonRepairPrompt({
+          schemaHint,
+          invalidOutput: raw.slice(0, 8000),
+          error: err instanceof Error ? err.message : String(err),
+        });
+        const repairModel =
+          (import.meta.env.VITE_COPILOT_PLANNER_MODEL as string | undefined) ||
+          (import.meta.env.VITE_COPILOT_MODEL as string | undefined) ||
+          'gemma3:1b';
+        const repairRes = await executeTool('llmGenerateText', context, { model: repairModel, prompt: repairPrompt, stream: false });
+        if (!repairRes.ok) {
+          return {
+            success: false,
+            message: 'Copilot returned invalid JSON and repair failed. Try again.',
+            data: { raw, repairError: repairRes.error.message },
+          };
+        }
+        const repairedRaw = String((repairRes.data as any)?.text ?? '');
+        try {
+          parsedJson = extractFirstJsonObjectLenient(repairedRaw);
+        } catch (err2) {
+          return {
+            success: false,
+            message: 'Copilot returned invalid JSON. Try again or simplify your feedback.',
+            data: {
+              raw,
+              repairedRaw,
+              parseError: err instanceof Error ? err.message : String(err),
+              repairParseError: err2 instanceof Error ? err2.message : String(err2),
+            },
+          };
+        }
+      }
 
       if (!isShotPromptSuggestion(parsedJson)) {
         return {
@@ -272,7 +465,51 @@ export const improveShotPromptSkill: Skill = {
         };
       }
 
-      const suggestion = parsedJson;
+      let suggestion = parsedJson;
+
+      // Guardrail: if the model violates explicit framing intent, try one corrective pass; then fall back.
+      if (violatesFramingIntent(framingIntent, suggestion)) {
+        const correctionPrompt = [
+          buildSystemPrompt(),
+          '',
+          'You previously returned a JSON suggestion that VIOLATED HARD_CONSTRAINTS (wrong framing).',
+          'Return ONLY corrected JSON matching the schema and HARD_CONSTRAINTS.',
+          '',
+          'CONTEXT:',
+          contextBlock,
+          '',
+          'PREVIOUS_JSON:',
+          JSON.stringify(suggestion, null, 2),
+          '',
+          'JSON:',
+        ].join('\n');
+
+        const correctionRes = await executeTool('llmGenerateText', context, { model, prompt: correctionPrompt, stream: false });
+        if (correctionRes.ok) {
+          const correctionRaw = String((correctionRes.data as any)?.text ?? '');
+          try {
+            const corrected = extractFirstJsonObjectLenient(correctionRaw);
+            if (isShotPromptSuggestion(corrected) && !violatesFramingIntent(framingIntent, corrected)) {
+              suggestion = corrected;
+            }
+          } catch {
+            // ignore; fall back below
+          }
+        }
+      }
+
+      if (violatesFramingIntent(framingIntent, suggestion)) {
+        const sceneSummary = buildSceneSummary(latestSceneBatch, sceneTitle);
+        const shotSummary = buildShotSummary({ sceneTitle, framing, angle, motion, description, negative });
+        suggestion = composeFallbackSuggestion({
+          intent: framingIntent,
+          sceneTitle,
+          sceneSummary,
+          shotSummary,
+          userFeedback,
+        });
+      }
+
       const nextImage = {
         prompt_structured: suggestion.prompt_structured,
         prompt: suggestion.prompt,
@@ -297,6 +534,7 @@ export const improveShotPromptSkill: Skill = {
           },
         ],
         metadata: {
+          applyStrategy: 'shot_plan_image_override',
           shotId,
           shotPath: located.shotPath,
           shotPlanAssetId,

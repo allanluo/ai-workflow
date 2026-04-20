@@ -20,6 +20,7 @@ import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { startWorkflowRunInBackground } from '../runtime/execution-engine.js';
+import { scheduleDeleteWorkflowIndex, scheduleIndexWorkflow } from '../copilot/vectorIndexScheduler.js';
 
 const workflowModeSchema = z.enum(['simple', 'guided', 'advanced']);
 const workflowStatusSchema = z.enum(['draft', 'testing', 'approved', 'deprecated']);
@@ -62,6 +63,7 @@ export async function registerWorkflowRoutes(app: FastifyInstance) {
     const params = z.object({ projectId: z.string() }).parse(request.params);
     const body = createWorkflowSchema.parse(request.body);
     const workflow = createWorkflowDefinition(params.projectId, body);
+    scheduleIndexWorkflow(workflow.id);
 
     reply.code(201);
 
@@ -125,6 +127,8 @@ export async function registerWorkflowRoutes(app: FastifyInstance) {
       };
     }
 
+    scheduleIndexWorkflow(workflow.id);
+
     return {
       ok: true,
       data: { workflow },
@@ -134,6 +138,7 @@ export async function registerWorkflowRoutes(app: FastifyInstance) {
 
   app.delete('/workflows/:workflowId', async (request, reply) => {
     const params = z.object({ workflowId: z.string() }).parse(request.params);
+    const existing = getWorkflowDefinitionById(params.workflowId);
     const deleted = deleteWorkflowDefinition(params.workflowId);
 
     if (!deleted) {
@@ -147,6 +152,8 @@ export async function registerWorkflowRoutes(app: FastifyInstance) {
         },
       };
     }
+
+    if (existing) scheduleDeleteWorkflowIndex(existing.project_id, existing.id);
 
     return {
       ok: true,
@@ -222,6 +229,8 @@ export async function registerWorkflowRoutes(app: FastifyInstance) {
         },
       };
     }
+
+    scheduleIndexWorkflow(params.workflowId);
 
     reply.code(201);
 

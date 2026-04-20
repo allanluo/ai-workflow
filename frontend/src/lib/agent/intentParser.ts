@@ -2,12 +2,21 @@ import type { ParsedIntent } from './types';
 import { createWorkflowSkill } from './skills/createWorkflow';
 import { addSceneSkill } from './skills/addScene';
 import { improveShotPromptSkill } from './skills/improveShotPrompt';
+import { generateCanonSkill } from './skills/generateCanon';
+import { updateCanonSkill } from './skills/updateCanon';
+import { generateScenesSkill } from './skills/generateScenes';
+import { generateShotPlansSkill } from './skills/generateShotPlans';
+import { generateShotsSkill } from './skills/generateShots';
 import type { SkillContext } from './types';
 
 export type SkillName =
   | 'createWorkflow'
   | 'addScene'
   | 'improveShotPrompt'
+  | 'generateCanon'
+  | 'updateCanon'
+  | 'generateScenes'
+  | 'generateShotPlans'
   | 'explainNode'
   | 'generateShots'
   | 'chat';
@@ -33,12 +42,36 @@ const intentPatterns: IntentPattern[] = [
     ],
   },
   {
-    skillName: 'generateShots',
+    // "Generate shots" is an alias for generating a shot plan asset.
+    skillName: 'generateShotPlans',
     patterns: [
       /generate\s+(new\s+)?shots/i,
       /create\s+(new\s+)?shots/i,
       /make\s+(new\s+)?shots/i,
       /I\s+want\s+(to\s+)?add\s+(new\s+)?shots/i,
+    ],
+  },
+  {
+    skillName: 'generateShotPlans',
+    patterns: [/generate\s+(a\s+)?shot\s+plan/i, /generate\s+shot\s+plans/i],
+  },
+  {
+    skillName: 'generateScenes',
+    patterns: [/generate\s+scenes/i, /create\s+scenes/i, /make\s+scenes/i, /generate\s+scene\s+list/i],
+  },
+  {
+    skillName: 'generateCanon',
+    patterns: [/extract\s+canon/i, /generate\s+canon/i],
+  },
+  {
+    skillName: 'updateCanon',
+    patterns: [
+      /update\s+(the\s+)?canon/i,
+      /edit\s+(the\s+)?canon/i,
+      /change\s+(the\s+)?canon/i,
+      /modify\s+(the\s+)?canon/i,
+      /canon\s+update/i,
+      /canon\s+edit/i,
     ],
   },
   {
@@ -64,6 +97,9 @@ const intentPatterns: IntentPattern[] = [
       /fix\s+(this\s+)?(shot\s+)?(image\s+)?prompt/i,
       /make\s+(this\s+)?shot\s+more\s+cinematic/i,
       /shot\s+prompt\s+improvement/i,
+      /wrong\s+(image|prompt)/i,
+      /doesn['’]?t\s+match/i,
+      /\bimage\b.*\bshould\b/i,
     ],
   },
 ];
@@ -72,10 +108,71 @@ const skills = {
   createWorkflow: createWorkflowSkill,
   addScene: addSceneSkill,
   improveShotPrompt: improveShotPromptSkill,
+  generateCanon: generateCanonSkill,
+  updateCanon: updateCanonSkill,
+  generateScenes: generateScenesSkill,
+  generateShotPlans: generateShotPlansSkill,
+  generateShots: generateShotsSkill,
 };
+
+function parseSlashIntent(userInput: string): ParsedIntent | null {
+  const raw = (userInput || '').trim();
+  if (!raw.startsWith('/')) return null;
+  const body = raw.slice(1).trim().toLowerCase();
+  if (!body) return null;
+
+  const parts = body.split(/\s+/).filter(Boolean);
+  const cmd = parts[0] ?? '';
+  const rest = parts.slice(1).join(' ');
+
+  const key = cmd.replace(/[^a-z0-9_-]/g, '');
+  const restKey = rest.replace(/[^a-z0-9_-]/g, ' ');
+
+  const is = (...names: string[]) => names.includes(key);
+
+  // Canon
+  if (is('canon', 'extract-canon', 'extractcanon') || (key === 'extract' && restKey.startsWith('canon'))) {
+    return { skillName: 'generateCanon', confidence: 1.0 };
+  }
+  if (
+    is('update-canon', 'edit-canon', 'canon-update', 'canonedit') ||
+    (key === 'canon' && (restKey.startsWith('update') || restKey.startsWith('edit') || restKey.startsWith('change') || restKey.startsWith('modify')))
+  ) {
+    return { skillName: 'updateCanon', confidence: 1.0, parameters: { args: rest } };
+  }
+  if (is('update-canon', 'edit-canon', 'canon-update', 'canonedit') || (key === 'canon' && restKey.startsWith('update'))) {
+    return { skillName: 'updateCanon', confidence: 1.0, parameters: { args: rest } };
+  }
+
+  // Scenes
+  if (is('scenes', 'generate-scenes', 'genscenes') || ((key === 'generate' || key === 'gen') && restKey.startsWith('scenes'))) {
+    return { skillName: 'generateScenes', confidence: 1.0 };
+  }
+
+  // Shots / shot plans
+  if (
+    is('shots', 'generate-shots', 'genshots', 'shot-plans', 'shotplans', 'shotplan') ||
+    ((key === 'generate' || key === 'gen') && (restKey.startsWith('shots') || restKey.startsWith('shot')))
+  ) {
+    return { skillName: 'generateShotPlans', confidence: 1.0 };
+  }
+
+  // Workflow / scene creation shortcuts (optional args)
+  if (is('create-workflow', 'workflow', 'new-workflow')) {
+    return { skillName: 'createWorkflow', confidence: 1.0, parameters: { args: rest } };
+  }
+  if (is('add-scene', 'scene', 'new-scene')) {
+    return { skillName: 'addScene', confidence: 1.0, parameters: { args: rest } };
+  }
+
+  return null;
+}
 
 export function parseIntent(userInput: string): ParsedIntent | null {
   const lowerInput = userInput.toLowerCase();
+
+  const slash = parseSlashIntent(userInput);
+  if (slash) return slash;
 
   for (const intent of intentPatterns) {
     for (const pattern of intent.patterns) {
@@ -96,10 +193,21 @@ export async function executeSkill(
   context: SkillContext,
   userInput: string
 ): Promise<{ skillResult: unknown; shouldChat: boolean }> {
+  // Support slash command args by stripping the leading command token for skills that expect free-form input.
+  const trimmed = (userInput || '').trim();
+  const isSlash = trimmed.startsWith('/');
+  let effectiveInput = userInput;
+  if (isSlash) {
+    const body = trimmed.slice(1).trim();
+    const parts = body.split(/\s+/).filter(Boolean);
+    const rest = parts.slice(1).join(' ').trim();
+    effectiveInput = rest;
+  }
+
   const skill = skills[skillName as keyof typeof skills];
 
   if (skill) {
-    const result = await skill.execute(context as never, userInput);
+    const result = await skill.execute(context as never, effectiveInput);
     return { skillResult: result, shouldChat: !result.success };
   }
 

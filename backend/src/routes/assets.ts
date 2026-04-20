@@ -13,6 +13,7 @@ import {
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { config } from '../config.js';
+import { scheduleIndexAsset } from '../copilot/vectorIndexScheduler.js';
 
 const createAssetSchema = z.object({
   asset_type: z.string().min(1).max(100),
@@ -72,6 +73,7 @@ export async function registerAssetRoutes(app: FastifyInstance) {
     const params = z.object({ projectId: z.string() }).parse(request.params);
     const body = createAssetSchema.parse(request.body);
     const asset = createAsset(params.projectId, body);
+    scheduleIndexAsset(asset.id);
 
     reply.code(201);
 
@@ -143,6 +145,8 @@ export async function registerAssetRoutes(app: FastifyInstance) {
       };
     }
 
+    scheduleIndexAsset(asset.id);
+
     return {
       ok: true,
       data: { asset },
@@ -202,6 +206,8 @@ export async function registerAssetRoutes(app: FastifyInstance) {
         },
       };
     }
+
+    scheduleIndexAsset(params.assetId);
 
     reply.code(201);
 

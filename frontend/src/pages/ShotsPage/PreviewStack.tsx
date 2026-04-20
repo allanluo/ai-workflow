@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Shot } from './ShotsPage';
 import {
+  createAssetVersion,
+  fetchAsset,
   fetchJobStatus,
   fetchProjectAssets,
   generateCharacterImage,
@@ -11,7 +13,14 @@ import {
   type JobStatus,
 } from '../../lib/api';
 import { showToast } from '../../stores';
-import { usePanelStore, useSelectionStore } from '../../stores';
+import { useCopilotActionsStore, usePanelStore, useSelectionStore } from '../../stores';
+import {
+  ensureShotIdsInPlan,
+  locateShotInPlan,
+  parseShotPlanForEdit,
+  updateShotImageOverrideInPlan,
+  writeBackShotPlan,
+} from '../../lib/shotPlanEditing';
 
 interface PreviewStackProps {
   projectId: string;
@@ -32,6 +41,7 @@ type StoredShotMedia = Record<
 >;
 
 export function PreviewStack({ projectId, shot }: PreviewStackProps) {
+  const queryClient = useQueryClient();
   const videoWorkflow =
     (import.meta.env.VITE_VIDEO_WORKFLOW as string | undefined) || 'fast_txt2video';
   const image2VideoWorkflow =
@@ -40,13 +50,22 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
   const image2VideoLength = image2VideoLengthRaw ? Number(image2VideoLengthRaw) : 81;
   const [activeTab, setActiveTab] = useState<PreviewTab>('image');
   const [isGenerating, setIsGenerating] = useState(false);
+  const [handledCopilotRequestId, setHandledCopilotRequestId] = useState<string | null>(null);
   const [imageByShotId, setImageByShotId] = useState<Record<string, string>>({});
   const [videoByShotId, setVideoByShotId] = useState<Record<string, string>>({});
   const [videoJobByShotId, setVideoJobByShotId] = useState<Record<string, string>>({});
   const [videoJobStatusByShotId, setVideoJobStatusByShotId] = useState<Record<string, string>>({});
   const [hydratedForProjectId, setHydratedForProjectId] = useState<string | null>(null);
+  const [promptDraft, setPromptDraft] = useState('');
+  const [negativePromptDraft, setNegativePromptDraft] = useState('');
+  const [isPromptDirty, setIsPromptDirty] = useState(false);
+  const [isSavingPrompt, setIsSavingPrompt] = useState(false);
   const setRightPanelTab = usePanelStore(s => s.setRightPanelTab);
   const selectShot = useSelectionStore(s => s.selectShot);
+  const pendingShotImageGeneration = useCopilotActionsStore(s => s.pendingShotImageGeneration);
+  const clearPendingShotImageGeneration = useCopilotActionsStore(
+    s => s.clearPendingShotImageGeneration
+  );
 
   const imageUrl = imageByShotId[shot.id] || '';
   const videoUrl = videoByShotId[shot.id] || '';
@@ -54,6 +73,31 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
   const videoJobStatus = videoJobStatusByShotId[shot.id] || '';
 
   const canGenerate = Boolean(projectId) && Boolean(shot?.id);
+  const videoJobStatusLower = (videoJobStatus || '').toLowerCase();
+  const videoJobIsTerminal =
+    videoJobStatusLower === 'completed' ||
+    videoJobStatusLower === 'success' ||
+    videoJobStatusLower === 'succeeded' ||
+    videoJobStatusLower === 'failed' ||
+    videoJobStatusLower === 'error' ||
+    videoJobStatusLower === 'cancelled' ||
+    videoJobStatusLower === 'canceled';
+  const videoJobIsActive = Boolean(videoJobId) && !videoJobIsTerminal && !videoUrl;
+
+  const clearVideoJobState = () => {
+    setVideoJobByShotId(prev => {
+      if (!prev[shot.id]) return prev;
+      const next = { ...prev };
+      delete next[shot.id];
+      return next;
+    });
+    setVideoJobStatusByShotId(prev => {
+      if (!prev[shot.id]) return prev;
+      const next = { ...prev };
+      delete next[shot.id];
+      return next;
+    });
+  };
 
   useEffect(() => {
     if (!projectId) return;
@@ -380,15 +424,179 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
     return override || assembledPrompt;
   }, [assembledPrompt, shot.generatorPrompt]);
 
-  const promptDisplay = useMemo(() => {
+  useEffect(() => {
+    // Re-hydrate manual draft when shot changes or generator prompt updates.
+    const base = (shot.generatorPrompt || '').trim() || generationPrompt;
+    setPromptDraft(base);
+    setNegativePromptDraft((shot.generatorNegativePrompt || '').trim());
+    setIsPromptDirty(false);
+  }, [generationPrompt, shot.generatorNegativePrompt, shot.generatorPrompt, shot.id]);
+
+  const effectivePromptForGeneration = useMemo(() => {
+    const draft = promptDraft.trim();
+    return draft || generationPrompt;
+  }, [generationPrompt, promptDraft]);
+
+  const generationPromptForApi = useMemo(() => {
+    const negative = (negativePromptDraft || shot.generatorNegativePrompt || '').trim();
+    if (!negative) return effectivePromptForGeneration;
+    if (effectivePromptForGeneration.toLowerCase().includes('negative_prompt:'))
+      return effectivePromptForGeneration;
+    return `${effectivePromptForGeneration}\n\nNEGATIVE_PROMPT:\n${negative}`;
+  }, [effectivePromptForGeneration, negativePromptDraft, shot.generatorNegativePrompt]);
+
+  // Legacy name used by older UI paths (and can be helpful for debugging).
+  const promptDisplay = (() => {
     const structured = (shot.generatorPromptStructured || '').trim();
-    const negative = (shot.generatorNegativePrompt || '').trim();
+    const negative = (negativePromptDraft || shot.generatorNegativePrompt || '').trim();
     const parts: string[] = [];
     if (structured) parts.push(structured);
     if (negative) parts.push(`NEGATIVE_PROMPT:\n${negative}`);
-    parts.push(`SENT_PROMPT:\n${generationPrompt}`);
+    parts.push(`SENT_PROMPT:\n${effectivePromptForGeneration}`);
     return parts.join('\n\n').trim();
-  }, [generationPrompt, shot.generatorNegativePrompt, shot.generatorPromptStructured]);
+  })();
+
+  const savePromptOverride = async () => {
+    if (!projectId) return;
+    if (!shot?.id || !shot?.planId) {
+      showToast({ type: 'error', title: 'Missing shot', message: 'Select a shot first.' });
+      return;
+    }
+    const prompt = promptDraft.trim();
+    if (!prompt) {
+      showToast({ type: 'error', title: 'Missing prompt', message: 'Prompt cannot be empty.' });
+      return;
+    }
+
+    setIsSavingPrompt(true);
+    try {
+      const planAsset = await fetchAsset(shot.planId);
+      const parsed = parseShotPlanForEdit(planAsset);
+      if (!parsed) {
+        showToast({
+          type: 'error',
+          title: 'Unsupported plan',
+          message: 'This shot plan format cannot be edited.',
+        });
+        return;
+      }
+
+      const plan = JSON.parse(JSON.stringify(parsed.plan ?? {})) as Record<string, unknown>;
+      ensureShotIdsInPlan(plan, planAsset.id);
+      const located = locateShotInPlan(plan, shot.id);
+      if (!located) {
+        showToast({
+          type: 'error',
+          title: 'Shot not found',
+          message: 'Could not find this shot inside the shot plan.',
+        });
+        return;
+      }
+
+      updateShotImageOverrideInPlan(plan, located, {
+        prompt,
+        negative_prompt: negativePromptDraft.trim() || undefined,
+        prompt_structured: (shot.generatorPromptStructured || '').trim() || undefined,
+        width: 1280,
+        height: 720,
+        last_updated_by: 'manual',
+        last_updated_at: new Date().toISOString(),
+      });
+
+      const nextContent = writeBackShotPlan(parsed, plan);
+      await createAssetVersion(planAsset.id, {
+        content: nextContent,
+        source_mode: 'manual',
+        status: 'draft',
+        make_current: true,
+      });
+
+      queryClient.invalidateQueries({ queryKey: ['project-assets', projectId, 'shot'] });
+      showToast({ type: 'success', title: 'Saved', message: 'Saved prompt override to the shot plan.' });
+      setIsPromptDirty(false);
+    } catch (err) {
+      showToast({
+        type: 'error',
+        title: 'Save failed',
+        message: err instanceof Error ? err.message : 'Unknown error',
+      });
+    } finally {
+      setIsSavingPrompt(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!videoJobId) return;
+    if (videoJobStatus === 'completed' || videoJobStatus === 'failed' || videoJobStatus === 'error') {
+      clearVideoJobState();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [videoJobId, videoJobStatus, shot.id]);
+
+  useEffect(() => {
+    // If we already have a video URL, any lingering job id is stale and should not block UI actions.
+    if (!videoUrl) return;
+    if (!videoJobId) return;
+    clearVideoJobState();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [videoJobId, videoUrl, shot.id]);
+
+  useEffect(() => {
+    const pending = pendingShotImageGeneration;
+    if (!pending) return;
+    if (pending.requestId === handledCopilotRequestId) return;
+    if (pending.projectId !== projectId) return;
+    if (pending.shotId !== shot.id) return;
+
+    setHandledCopilotRequestId(pending.requestId);
+    setActiveTab('image');
+
+    const run = async () => {
+      if (isGenerating) return;
+      setIsGenerating(true);
+      try {
+        const promptForApi =
+          pending.negativePrompt && pending.negativePrompt.trim()
+            ? `${pending.prompt}\n\nNEGATIVE_PROMPT:\n${pending.negativePrompt.trim()}`
+            : pending.prompt;
+        const result = await generateCharacterImage({
+          projectId,
+          prompt: promptForApi,
+          width: pending.width,
+          height: pending.height,
+        });
+        if (!result.image_url) {
+          showToast({
+            type: 'warning',
+            title: 'Image queued',
+            message: `Job ${result.job_id} started (no image URL yet).`,
+          });
+          return;
+        }
+        setImageByShotId(prev => ({ ...prev, [shot.id]: result.image_url! }));
+        showToast({ type: 'success', title: 'Image generated', message: 'Copilot regenerated the image.' });
+      } catch (err) {
+        showToast({
+          type: 'error',
+          title: 'Copilot generation failed',
+          message: err instanceof Error ? err.message : 'Unknown error',
+        });
+      } finally {
+        setIsGenerating(false);
+        clearPendingShotImageGeneration();
+      }
+    };
+
+    run();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    pendingShotImageGeneration,
+    handledCopilotRequestId,
+    projectId,
+    shot.id,
+    isGenerating,
+    clearPendingShotImageGeneration,
+  ]);
 
   const handleGenerate = async () => {
     if (!canGenerate) return;
@@ -401,7 +609,7 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
       if (activeTab === 'image') {
         const result = await generateCharacterImage({
           projectId,
-          prompt: generationPrompt,
+          prompt: generationPromptForApi,
           width: 1280,
           height: 720,
         });
@@ -415,9 +623,11 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
         }
         setImageByShotId(prev => ({ ...prev, [shot.id]: result.image_url! }));
       } else {
+        // Clear old preview so the user sees job progress for the new generation.
+        setVideoByShotId(prev => ({ ...prev, [shot.id]: '' }));
         const result = await generateProjectVideo({
           projectId,
-          prompt: generationPrompt,
+          prompt: generationPromptForApi,
           workflow: videoWorkflow,
           width: 1024,
           height: 576,
@@ -433,6 +643,7 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
           return;
         }
         setVideoByShotId(prev => ({ ...prev, [shot.id]: result.video_url! }));
+        clearVideoJobState();
       }
     } catch (err) {
       showToast({
@@ -462,9 +673,11 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
 
     setIsGenerating(true);
     try {
+      // Clear old preview so the user sees job progress for the new conversion.
+      setVideoByShotId(prev => ({ ...prev, [shot.id]: '' }));
       const result = await generateVideoFromImage({
         projectId,
-        prompt: generationPrompt,
+        prompt: generationPromptForApi,
         workflow: image2VideoWorkflow,
         width: 640,
         height: 480,
@@ -483,6 +696,7 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
         return;
       }
       setVideoByShotId(prev => ({ ...prev, [shot.id]: result.video_url! }));
+      clearVideoJobState();
     } catch (err) {
       showToast({
         type: 'error',
@@ -539,6 +753,7 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
           const url = extractVideoUrlFromJob(job);
           if (url) {
             setVideoByShotId(prev => ({ ...prev, [shot.id]: url }));
+            clearVideoJobState();
             showToast({ type: 'success', title: 'Video ready', message: 'Video generated.' });
           } else {
             showToast({
@@ -546,7 +761,7 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
               title: 'Video completed',
               message: 'Job completed but no video URL was returned.',
             });
-            setVideoJobByShotId(prev => ({ ...prev, [shot.id]: '' }));
+            clearVideoJobState();
           }
         }
 
@@ -554,7 +769,7 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
           if (interval) window.clearInterval(interval);
           interval = undefined;
           if (job.status === 'failed' || job.status === 'error') {
-            setVideoJobByShotId(prev => ({ ...prev, [shot.id]: '' }));
+            clearVideoJobState();
             showToast({
               type: 'error',
               title: 'Video failed',
@@ -631,9 +846,9 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
     );
   };
 
-  const renderVideoPreview = () => {
-    if (!videoUrl) {
-      return (
+	  const renderVideoPreview = () => {
+	    if (!videoUrl) {
+	      return (
         <div className="flex flex-col items-center justify-center h-full text-center">
           <div className="w-full aspect-video bg-comfy-input-bg rounded-lg flex items-center justify-center mb-4">
             <span className="text-comfy-muted text-sm">
@@ -642,18 +857,32 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
                 : 'No video generated'}
             </span>
           </div>
-	          <div className="flex items-center gap-2">
-	            <button
-	              onClick={handleGenerate}
-	              disabled={isGenerating || !canGenerate || Boolean(videoJobId)}
-	              className="comfy-btn disabled:opacity-50"
-	            >
-	              {videoJobId ? 'Generating…' : isGenerating ? 'Generating video...' : 'Generate Video'}
-	            </button>
-	          </div>
-	        </div>
-	      );
-	    }
+		          <div className="flex items-center gap-2">
+		            <button
+		              onClick={handleGenerate}
+		              disabled={isGenerating || !canGenerate || videoJobIsActive}
+		              className="comfy-btn disabled:opacity-50"
+		            >
+		              {videoJobIsActive ? 'Generating…' : isGenerating ? 'Generating video...' : 'Generate Video'}
+		            </button>
+		            {videoJobId && !videoJobIsActive && (
+		              <button
+		                type="button"
+		                onClick={() => {
+		                  clearVideoJobState();
+		                  setVideoByShotId(prev => ({ ...prev, [shot.id]: '' }));
+		                }}
+		                className="comfy-btn-secondary disabled:opacity-50"
+		                disabled={isGenerating}
+		                title="Clear the previous job and try again"
+		              >
+		                Reset
+		              </button>
+		            )}
+		          </div>
+		        </div>
+		      );
+		    }
 
     return (
       <div className="space-y-4">
@@ -692,32 +921,32 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
 	        >
 	          Image
 	        </button>
+			        <button
+			          type="button"
+			          onClick={async () => {
+			            setActiveTab('video');
+			            await handleImageToVideo();
+			          }}
+		          disabled={!imageUrl || isGenerating || !canGenerate || videoJobIsActive}
+		          className="comfy-segment-btn disabled:opacity-50"
+		          title={
+		            imageUrl
+		              ? 'Generate a video using the generated image as reference'
+		              : 'Generate an image first, then convert it to video'
+		          }
+		        >
+		          Image → Video
+		        </button>
 		        <button
-		          type="button"
-		          onClick={async () => {
-		            setActiveTab('video');
-	            await handleImageToVideo();
-	          }}
-	          disabled={!imageUrl || isGenerating || !canGenerate || Boolean(videoJobId)}
-	          className="comfy-segment-btn disabled:opacity-50"
-	          title={
-	            imageUrl
-	              ? 'Generate a video using the generated image as reference'
-	              : 'Generate an image first, then convert it to video'
-	          }
-	        >
-	          Image → Video
-	        </button>
-	        <button
-	          onClick={() => setActiveTab('video')}
-	            className={`comfy-segment-btn ${
-	              activeTab === 'video' ? 'comfy-segment-btn-active' : ''
-	            }`}
-	        >
-	          Video
-	        </button>
-	        </div>
-	      </div>
+		          onClick={() => setActiveTab('video')}
+		            className={`comfy-segment-btn ${
+		              activeTab === 'video' ? 'comfy-segment-btn-active' : ''
+		            }`}
+		        >
+		          Video
+		        </button>
+		        </div>
+		      </div>
 
       <details className="rounded-lg border border-comfy-border bg-comfy-input-bg p-3 mb-4">
         <summary className="cursor-pointer text-xs font-semibold text-comfy-muted uppercase">
@@ -745,7 +974,78 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
             Improve Prompt (Copilot)
           </button>
         </div>
-        <pre className="mt-2 whitespace-pre-wrap text-xs text-comfy-text">{promptDisplay}</pre>
+        <div className="mt-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="text-[11px] text-comfy-muted">
+              {shot.generatorPrompt ? 'Manual override saved' : 'Using assembled context prompt'}
+            </div>
+            {isPromptDirty && <div className="text-[11px] text-comfy-warning">Unsaved</div>}
+          </div>
+
+          <label className="block text-[11px] text-comfy-muted">SENT_PROMPT</label>
+          <textarea
+            value={promptDraft}
+            onChange={e => {
+              setPromptDraft(e.target.value);
+              setIsPromptDirty(true);
+            }}
+            rows={8}
+            className="comfy-input w-full text-xs font-mono resize-none"
+            placeholder="Prompt sent to the generator…"
+          />
+
+          <label className="block text-[11px] text-comfy-muted">NEGATIVE_PROMPT (optional)</label>
+          <textarea
+            value={negativePromptDraft}
+            onChange={e => {
+              setNegativePromptDraft(e.target.value);
+              setIsPromptDirty(true);
+            }}
+            rows={3}
+            className="comfy-input w-full text-xs font-mono resize-none"
+            placeholder="What to avoid…"
+          />
+
+          <div className="flex items-center justify-end gap-2">
+            <button
+              type="button"
+              className="comfy-btn-secondary text-xs disabled:opacity-50"
+              disabled={isSavingPrompt}
+              onClick={() => {
+                const base = (shot.generatorPrompt || '').trim() || generationPrompt;
+                setPromptDraft(base);
+                setNegativePromptDraft((shot.generatorNegativePrompt || '').trim());
+                setIsPromptDirty(false);
+              }}
+              title="Reset to the currently loaded prompt"
+            >
+              Reset
+            </button>
+            <button
+              type="button"
+              className="comfy-btn text-xs disabled:opacity-50"
+              disabled={isSavingPrompt || !isPromptDirty}
+              onClick={savePromptOverride}
+              title="Save this prompt override into the shot plan"
+            >
+              {isSavingPrompt ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+
+          <details className="rounded border border-comfy-border bg-comfy-input-bg p-2">
+            <summary className="cursor-pointer text-[11px] font-semibold text-comfy-muted uppercase">
+              Context (assembled)
+            </summary>
+            <pre className="mt-2 whitespace-pre-wrap text-xs text-comfy-text">{assembledPrompt}</pre>
+          </details>
+
+          <details className="rounded border border-comfy-border bg-comfy-input-bg p-2">
+            <summary className="cursor-pointer text-[11px] font-semibold text-comfy-muted uppercase">
+              Preview (sent to generator)
+            </summary>
+            <pre className="mt-2 whitespace-pre-wrap text-xs text-comfy-text">{promptDisplay}</pre>
+          </details>
+        </div>
       </details>
 
       {/* Preview Content */}

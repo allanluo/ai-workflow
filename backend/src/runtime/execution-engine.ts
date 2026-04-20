@@ -8,6 +8,7 @@ import {
   getWorkflowRunExecutionContext,
   startWorkflowRun,
 } from '@ai-workflow/database';
+import { scheduleIndexNodeRun, scheduleIndexWorkflowRun } from '../copilot/vectorIndexScheduler.js';
 import * as adapters from '../services/adapters.js';
 import { config } from '../config.js';
 import { pollJobUntilComplete } from './job-poller.js';
@@ -616,6 +617,8 @@ async function executeWorkflowRun(workflowRunId: string) {
         );
 
         completeNodeRun(nodeRun.id, output, 'completed');
+        scheduleIndexNodeRun(nodeRun.id);
+        scheduleIndexWorkflowRun(workflowRunId);
 
         // Store node output for next node to use as input
         console.log(
@@ -685,12 +688,15 @@ async function executeWorkflowRun(workflowRunId: string) {
           },
           'failed'
         );
+        scheduleIndexNodeRun(nodeRun.id);
+        scheduleIndexWorkflowRun(workflowRunId);
       }
 
       await delay(100);
     }
 
     completeWorkflowRun(workflowRunId);
+    scheduleIndexWorkflowRun(workflowRunId);
     console.log(`[Workflow ${workflowRunId}] Execution completed`);
     diag.info('execution', `Workflow execution completed`, {
       workflow_run_id: workflowRunId,
@@ -706,6 +712,7 @@ async function executeWorkflowRun(workflowRunId: string) {
       error: message,
     });
     failWorkflowRun(workflowRunId, message);
+    scheduleIndexWorkflowRun(workflowRunId);
   } finally {
     activeWorkflowRuns.delete(workflowRunId);
   }

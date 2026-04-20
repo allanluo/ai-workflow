@@ -13,6 +13,31 @@ export interface Project {
   metadata: Record<string, unknown>;
 }
 
+export type LLMEmbedResponse = {
+  model?: string;
+  dim?: number;
+  embedding: number[];
+};
+
+export async function embedText(input: { text: string; model?: string }): Promise<LLMEmbedResponse> {
+  const response = await fetch(`${API_BASE_URL}/llm/embed`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ input: input.text, model: input.model }),
+  });
+
+  if (!response.ok) {
+    const err = await response.text().catch(() => 'Unknown error');
+    throw new Error(`Embedding request failed with ${response.status}: ${err}`);
+  }
+
+  const data = (await response.json()) as LLMEmbedResponse;
+  if (!Array.isArray(data.embedding) || data.embedding.length === 0) {
+    throw new Error('Embedding response missing embedding vector.');
+  }
+  return data;
+}
+
 export interface ProjectEvent {
   id: string;
   event_type: string;
@@ -139,6 +164,17 @@ export interface WorkflowRun {
   warnings: string[];
   errors: string[];
   created_at: string;
+}
+
+export interface Output {
+  id: string;
+  project_id: string;
+  title: string;
+  output_type: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface NodeRun {
@@ -268,6 +304,241 @@ export async function fetchProjectFiles(projectId: string): Promise<FileRecord[]
   };
 
   return payload.data.items;
+}
+
+export async function fetchCopilotSession(projectId: string): Promise<{
+  session: { id: string; project_id: string; state: Record<string, unknown>; created_at: string; updated_at: string } | null;
+}> {
+  const response = await fetch(`${API_BASE_URL}/projects/${projectId}/copilot/session`);
+  if (!response.ok) {
+    throw new Error(`Copilot session request failed with ${response.status}`);
+  }
+  const payload = (await response.json()) as {
+    ok: boolean;
+    data: { session: any };
+  };
+  return { session: payload.data.session };
+}
+
+export async function saveCopilotSession(projectId: string, state: Record<string, unknown>): Promise<{
+  session: { id: string; project_id: string; state: Record<string, unknown>; created_at: string; updated_at: string };
+}> {
+  const response = await fetch(`${API_BASE_URL}/projects/${projectId}/copilot/session`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ state }),
+  });
+  if (!response.ok) {
+    throw new Error(`Copilot session save failed with ${response.status}`);
+  }
+  const payload = (await response.json()) as {
+    ok: boolean;
+    data: { session: any };
+  };
+  return { session: payload.data.session };
+}
+
+export async function appendCopilotAuditEvents(projectId: string, events: Array<Record<string, unknown>>) {
+  const response = await fetch(`${API_BASE_URL}/projects/${projectId}/copilot/audit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ events }),
+  });
+  if (!response.ok) {
+    throw new Error(`Copilot audit append failed with ${response.status}`);
+  }
+  const payload = (await response.json()) as { ok: boolean; data: { inserted: number } };
+  return payload.data;
+}
+
+export async function fetchCopilotAuditEvents(
+  projectId: string,
+  input?: { limit?: number }
+): Promise<{ items: Array<Record<string, unknown>> }> {
+  const params = new URLSearchParams();
+  if (input?.limit) params.set('limit', String(input.limit));
+  const qs = params.toString();
+
+  const response = await fetch(
+    `${API_BASE_URL}/projects/${projectId}/copilot/audit${qs ? `?${qs}` : ''}`
+  );
+  if (!response.ok) {
+    throw new Error(`Copilot audit request failed with ${response.status}`);
+  }
+  const payload = (await response.json()) as { ok: boolean; data: { items: Array<Record<string, unknown>> } };
+  return { items: payload.data.items };
+}
+
+export async function createCopilotPlanRun(input: {
+  projectId: string;
+  plan: Record<string, unknown>;
+  context: Record<string, unknown>;
+  confirmed: boolean;
+}): Promise<{ run: Record<string, unknown>; steps: Array<Record<string, unknown>> }> {
+  const response = await fetch(`${API_BASE_URL}/projects/${input.projectId}/copilot/runs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ plan: input.plan, context: input.context, confirmed: input.confirmed }),
+  });
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    throw new Error(`Create copilot run failed (${response.status}): ${text || 'Unknown error'}`);
+  }
+  const payload = (await response.json()) as { ok: boolean; data: { run: any; steps: any[] } };
+  return { run: payload.data.run, steps: payload.data.steps };
+}
+
+export async function fetchCopilotPlanRun(projectId: string, runId: string): Promise<{ run: Record<string, unknown> }> {
+  const response = await fetch(`${API_BASE_URL}/projects/${projectId}/copilot/runs/${runId}`);
+  if (!response.ok) throw new Error(`Copilot run request failed with ${response.status}`);
+  const payload = (await response.json()) as { ok: boolean; data: { run: any } };
+  return { run: payload.data.run };
+}
+
+export async function fetchCopilotPlanRunSteps(projectId: string, runId: string): Promise<{ items: any[] }> {
+  const response = await fetch(`${API_BASE_URL}/projects/${projectId}/copilot/runs/${runId}/steps`);
+  if (!response.ok) throw new Error(`Copilot run steps request failed with ${response.status}`);
+  const payload = (await response.json()) as { ok: boolean; data: { items: any[] } };
+  return { items: payload.data.items };
+}
+
+export async function cancelCopilotPlanRun(projectId: string, runId: string): Promise<{ run: any }> {
+  const response = await fetch(`${API_BASE_URL}/projects/${projectId}/copilot/runs/${runId}/cancel`, {
+    method: 'POST',
+  });
+  if (!response.ok) throw new Error(`Copilot run cancel failed with ${response.status}`);
+  const payload = (await response.json()) as { ok: boolean; data: { run: any } };
+  return { run: payload.data.run };
+}
+
+export async function applyCopilotProposal(input: {
+  projectId: string;
+  proposal: Record<string, unknown>;
+  confirmed: boolean;
+}): Promise<{ result: Record<string, unknown> }> {
+  const response = await fetch(`${API_BASE_URL}/projects/${input.projectId}/copilot/apply-proposal`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ proposal: input.proposal, confirmed: input.confirmed }),
+  });
+  const payloadText = await response.text().catch(() => '');
+  let payload: any = null;
+  try {
+    payload = payloadText ? JSON.parse(payloadText) : null;
+  } catch {
+    payload = null;
+  }
+  if (!response.ok) {
+    const msg = payload?.error?.message || payloadText || `Apply proposal failed with ${response.status}`;
+    throw new Error(msg);
+  }
+  return { result: payload?.data?.result ?? {} };
+}
+
+export type CopilotSemanticSearchHit = {
+  id: string;
+  context_type: string;
+  item_id: string;
+  item_version_id: string | null;
+  chunk_id: string;
+  chunk_index: number;
+  chunk_count: number;
+  model: string;
+  score: number;
+  content: string;
+  indexed_at: string;
+};
+
+export async function semanticSearchCopilotIndex(input: {
+  projectId: string;
+  query: string;
+  model?: string;
+  context_types?: string[];
+  limit?: number;
+}): Promise<{ items: CopilotSemanticSearchHit[]; model: string }> {
+  const response = await fetch(`${API_BASE_URL}/projects/${input.projectId}/copilot/semantic-search`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      query: input.query,
+      model: input.model,
+      context_types: input.context_types,
+      limit: input.limit,
+    }),
+  });
+  const text = await response.text().catch(() => '');
+  let payload: any = null;
+  try {
+    payload = text ? JSON.parse(text) : null;
+  } catch {
+    payload = null;
+  }
+  if (!response.ok) {
+    const msg = payload?.error?.message || text || `Semantic search failed with ${response.status}`;
+    throw new Error(msg);
+  }
+  return { items: (payload?.data?.items ?? []) as CopilotSemanticSearchHit[], model: String(payload?.data?.model ?? '') };
+}
+
+export async function reindexCopilotSemanticIndex(input: {
+  projectId: string;
+  model?: string;
+  context_types?: Array<'asset' | 'workflow' | 'run' | 'node_run'>;
+  max_runs?: number;
+  max_node_runs_per_run?: number;
+}): Promise<{
+  queued: number;
+  model: string | null;
+  picked_model?: string | null;
+  types: Array<'asset' | 'workflow' | 'run' | 'node_run'>;
+  max_runs?: number;
+  max_node_runs_per_run?: number;
+}> {
+  const response = await fetch(`${API_BASE_URL}/projects/${input.projectId}/copilot/reindex`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: input.model,
+      context_types: input.context_types,
+      max_runs: input.max_runs,
+      max_node_runs_per_run: input.max_node_runs_per_run,
+    }),
+  });
+  const text = await response.text().catch(() => '');
+  let payload: any = null;
+  try {
+    payload = text ? JSON.parse(text) : null;
+  } catch {
+    payload = null;
+  }
+  if (!response.ok) {
+    const msg = payload?.error?.message || text || `Reindex failed with ${response.status}`;
+    throw new Error(msg);
+  }
+  return payload?.data ?? { queued: 0, model: null, picked_model: null, types: [] };
+}
+
+export async function fetchCopilotIndexStatus(projectId: string): Promise<{
+  project_id: string;
+  total: number;
+  models: Record<
+    string,
+    { total: number; by_context_type: Record<string, number>; last_indexed_at: string | null }
+  >;
+}> {
+  const response = await fetch(`${API_BASE_URL}/projects/${projectId}/copilot/index-status`);
+  const text = await response.text().catch(() => '');
+  let payload: any = null;
+  try {
+    payload = text ? JSON.parse(text) : null;
+  } catch {
+    payload = null;
+  }
+  if (!response.ok) {
+    const msg = payload?.error?.message || text || `Index status failed with ${response.status}`;
+    throw new Error(msg);
+  }
+  return payload?.data ?? { project_id: projectId, total: 0, models: {} };
 }
 
 export async function uploadProjectFile(input: {
@@ -917,6 +1188,20 @@ export async function fetchProjectWorkflowRuns(
   return payload.data.items;
 }
 
+export async function fetchWorkflowRunById(workflowRunId: string): Promise<WorkflowRun> {
+  const response = await fetch(`${API_BASE_URL}/workflow-runs/${workflowRunId}`);
+  if (!response.ok) {
+    throw new Error(`Workflow run request failed with ${response.status}`);
+  }
+
+  const payload = (await response.json()) as {
+    ok: boolean;
+    data: { workflow_run: WorkflowRun };
+  };
+
+  return payload.data.workflow_run;
+}
+
 export async function createWorkflowRun(input: {
   workflowVersionId: string;
   trigger_source?: string;
@@ -945,4 +1230,111 @@ export async function createWorkflowRun(input: {
   };
 
   return payload.data.workflow_run;
+}
+
+export async function createOutput(input: { projectId: string; title: string; output_type: string }) {
+  const response = await fetch(`${API_BASE_URL}/projects/${input.projectId}/outputs`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      title: input.title,
+      output_type: input.output_type,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Create output failed with ${response.status}`);
+  }
+
+  const payload = (await response.json()) as {
+    ok: boolean;
+    data: { output: Output };
+  };
+
+  return payload.data.output;
+}
+
+export async function emitCopilotStepUpdate(input: {
+  projectId: string;
+  runId: string;
+  stepId: string;
+  status: 'pending' | 'running' | 'success' | 'error' | 'skipped';
+  result?: unknown;
+  error?: string;
+}) {
+  const response = await fetch(`${API_BASE_URL}/projects/${input.projectId}/copilot/runs/${input.runId}/steps/${input.stepId}/update`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      status: input.status,
+      result: input.result,
+      error: input.error,
+    }),
+  });
+
+  if (!response.ok) {
+    // Don't throw, just log - progress updates are not critical
+    console.warn(`Failed to emit step update: ${response.status}`);
+  }
+}
+
+export async function emitProjectEvent(input: {
+  projectId: string;
+  event_type: string;
+  target_type?: string;
+  target_id?: string;
+  payload?: Record<string, unknown>;
+}) {
+  const response = await fetch(`${API_BASE_URL}/projects/${input.projectId}/events`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      event_type: input.event_type,
+      target_type: input.target_type,
+      target_id: input.target_id,
+      payload: input.payload,
+    }),
+  });
+
+  if (!response.ok) {
+    console.warn(`Failed to emit project event: ${response.status}`);
+  }
+}
+
+export type CopilotPlanStep = {
+  id: string;
+  run_id: string;
+  project_id: string;
+  step_index: number;
+  step_id: string;
+  title: string;
+  tool: string;
+  status: 'pending' | 'running' | 'success' | 'error' | 'skipped';
+  params: Record<string, unknown>;
+  result?: unknown;
+  error?: unknown;
+  started_at?: string;
+  ended_at?: string;
+  updated_at: string;
+} & Record<string, unknown>;
+
+export async function fetchCopilotPlanStep(projectId: string, runId: string, stepId: string): Promise<CopilotPlanStep> {
+  const response = await fetch(`${API_BASE_URL}/projects/${projectId}/copilot/runs/${runId}/steps/${stepId}`);
+
+  if (!response.ok) {
+    throw new Error(`Copilot plan step request failed with ${response.status}`);
+  }
+
+  const payload = (await response.json()) as {
+    ok: boolean;
+    data: { step: CopilotPlanStep };
+  };
+
+  return payload.data.step;
 }

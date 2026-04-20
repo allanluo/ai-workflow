@@ -7,6 +7,7 @@ Related docs:
 - `docs/copilot_agent_design.md`
 - `docs/copilot_shot_prompt_design.md`
 - `docs/copilot_shot_prompt_implementation_plan.md`
+- `docs/copilot_full_implementation_plan.md`
 
 ---
 
@@ -177,4 +178,3 @@ Deliver the “simple use case” end-to-end with the agent/skill architecture.
 - **M1:** Phase 0–2 complete (agentic substrate + propose/apply)
 - **M2:** Phase 3–5 complete (shot prompt improvement shipped)
 - **M3:** Phase 6 complete (hardening + backend optional)
-

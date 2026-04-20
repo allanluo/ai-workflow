@@ -1,5 +1,5 @@
 import type { Skill, SkillContext, SkillResult } from '../types';
-import { fetchProjectAssets, createAsset } from '../../api';
+import { executeTool } from '../tools';
 
 export const addSceneSkill: Skill = {
   name: 'addScene',
@@ -9,28 +9,17 @@ export const addSceneSkill: Skill = {
 
   async execute(context: SkillContext, input: string): Promise<SkillResult> {
     try {
-      const assets = await fetchProjectAssets(context.projectId);
-      const sceneCount = assets.filter(a => a.asset_type === 'scene').length;
-      const newSceneNumber = sceneCount + 1;
-
-      const newScene = await createAsset({
-        projectId: context.projectId,
-        asset_type: 'scene',
-        asset_category: 'scene',
-        title: `Scene ${newSceneNumber}`,
-        content: { description: `Description for Scene ${newSceneNumber}` },
-        metadata: {},
-        source_mode: 'copilot',
+      const res = await executeTool('proposeAddScene', context, {
+        description: input?.trim() || undefined,
       });
+      if (!res.ok) return { success: false, message: res.error.message };
+      const proposal = (res.data as any)?.proposal;
+      if (!proposal) return { success: false, message: 'No proposal returned.' };
 
       return {
         success: true,
-        message: `I've created Scene ${newSceneNumber} in your project. You can now edit its content!`,
-        data: { assetId: newScene.id },
-        action: {
-          type: 'navigate',
-          payload: { path: `/projects/${context.projectId}/scenes` },
-        },
+        message: `I can add a new scene. Review the proposal and type /apply to create it.`,
+        proposal,
       };
     } catch (error) {
       console.error('Add scene skill error:', error);

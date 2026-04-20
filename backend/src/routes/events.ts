@@ -1,4 +1,4 @@
-import { listProjectEvents } from "@ai-workflow/database";
+import { listProjectEvents, insertProjectEvent } from "@ai-workflow/database";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
@@ -17,6 +17,24 @@ export async function registerEventRoutes(app: FastifyInstance) {
       },
       error: null
     };
+  });
+
+  app.post("/projects/:projectId/events", async (request) => {
+    const params = projectIdParamsSchema.parse(request.params);
+    const body = z.object({
+      event_type: z.string(),
+      target_type: z.string().optional(),
+      target_id: z.string().optional(),
+      payload: z.record(z.unknown()).optional(),
+    }).parse(request.body);
+
+    insertProjectEvent(params.projectId, body.event_type, {
+      target_type: body.target_type,
+      target_id: body.target_id,
+      ...body.payload,
+    });
+
+    return { ok: true, data: null, error: null };
   });
 
   app.get("/projects/:projectId/events/stream", async (request, reply) => {

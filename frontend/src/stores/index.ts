@@ -1,6 +1,8 @@
 export { useAppStore, type PageId, type UserMode, type ConnectionStatus } from './appStore';
 export { useSelectionStore } from './selectionStore';
 export { usePanelStore, type RightPanelTab, type BottomDockTab } from './panelStore';
+export { useCopilotActionsStore } from './copilotActionsStore';
+export { useCopilotSessionStore, type CopilotChatMessage } from './copilotSessionStore';
 export {
   useEventStore,
   type ProjectEvent,

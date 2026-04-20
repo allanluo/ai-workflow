@@ -41,7 +41,7 @@ function mapProject(row: typeof projects.$inferSelect) {
   };
 }
 
-function insertProjectEvent(projectId: string, eventType: string, payload: Record<string, unknown>) {
+export function insertProjectEvent(projectId: string, eventType: string, payload: Record<string, unknown>) {
   db.insert(projectEvents).values({
     id: randomUUID(),
     projectId,

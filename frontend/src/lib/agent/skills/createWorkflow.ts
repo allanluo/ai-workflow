@@ -1,28 +1,5 @@
 import type { Skill, SkillContext, SkillResult } from '../types';
-import { createWorkflowDraftFromTemplate } from '../../workflowCatalog';
-import { createWorkflow } from '../../api';
-
-const WORKFLOW_TEMPLATES: Record<string, string> = {
-  music_video: 'story_to_video',
-  music_video_madonna: 'story_to_video',
-  song_video: 'story_to_video',
-  mv: 'story_to_video',
-  narrated_story: 'narrated_story_video',
-  story_video: 'narrated_story_video',
-  default: 'story_to_video',
-};
-
-function detectTemplate(input: string): string {
-  const lower = input.toLowerCase();
-
-  if (lower.includes('music') || lower.includes('song') || lower.includes('mv')) {
-    return 'music_video';
-  }
-  if (lower.includes('narrat') || lower.includes('story')) {
-    return 'narrated_story';
-  }
-  return 'default';
-}
+import { executeTool } from '../tools';
 
 export const createWorkflowSkill: Skill = {
   name: 'createWorkflow',
@@ -38,28 +15,17 @@ export const createWorkflowSkill: Skill = {
 
   async execute(context: SkillContext, input: string): Promise<SkillResult> {
     try {
-      const templateKey = detectTemplate(input);
-      const templateId = WORKFLOW_TEMPLATES[templateKey] || WORKFLOW_TEMPLATES.default;
-      const template = createWorkflowDraftFromTemplate(templateId);
-
-      const workflow = await createWorkflow({
-        projectId: context.projectId,
-        title: template.title,
-        description: template.description,
-        mode: 'advanced',
-        template_type: template.template_type,
-        nodes: template.nodes,
-        edges: template.edges,
+      const res = await executeTool('proposeCreateWorkflow', context, {
+        request: input?.trim() || 'Create a new workflow',
       });
+      if (!res.ok) return { success: false, message: res.error.message };
+      const proposal = (res.data as any)?.proposal;
+      if (!proposal) return { success: false, message: 'No proposal returned.' };
 
       return {
         success: true,
-        message: `I've created a new workflow "${workflow.title}" for your project. You can now open it and customize the nodes!`,
-        data: { workflowId: workflow.id },
-        action: {
-          type: 'navigate',
-          payload: { path: `/projects/${context.projectId}/workflows`, workflowId: workflow.id },
-        },
+        message: `I can create a new workflow. Review the proposal and type /apply to create it.`,
+        proposal,
       };
     } catch (error) {
       console.error('Create workflow skill error:', error);

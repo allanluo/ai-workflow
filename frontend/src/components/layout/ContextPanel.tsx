@@ -48,15 +48,6 @@ export function ContextPanel() {
   // Set default tab when page changes
   const activeTab = rightPanelTab || defaultTab;
 
-  console.log(
-    'ContextPanel render - rightPanelTab:',
-    rightPanelTab,
-    'defaultTab:',
-    defaultTab,
-    'activeTab:',
-    activeTab
-  );
-
   const ActiveContent = tabContent[activeTab] || InspectorPanel;
 
   if (!rightPanelOpen) {
@@ -64,7 +55,7 @@ export function ContextPanel() {
   }
 
   return (
-    <aside className="bg-[var(--bg-base)] border-l border-[var(--border-light)] flex flex-col z-20 h-full overflow-hidden">
+    <aside className="bg-[var(--bg-base)] border-l border-[var(--border-light)] flex flex-col z-20 h-full min-h-0 overflow-hidden">
       {/* Tab Bar */}
       <PanelTabs
         tabs={tabs}
@@ -74,7 +65,7 @@ export function ContextPanel() {
       />
 
       {/* Tab Content */}
-      <div className="flex-1 overflow-y-auto">
+      <div className={`flex-1 min-h-0 ${activeTab === 'copilot' ? 'overflow-hidden' : 'overflow-y-auto'}`}>
         <ActiveContent />
       </div>
     </aside>

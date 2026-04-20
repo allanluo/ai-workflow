@@ -230,3 +230,83 @@ export const assetTags = sqliteTable('asset_tags', {
   createdBy: text('created_by'),
   createdAt: text('created_at').notNull(),
 });
+
+export const copilotSessions = sqliteTable('copilot_sessions', {
+  id: text('id').primaryKey(),
+  projectId: text('project_id').notNull(),
+  stateJson: text('state_json').notNull().default('{}'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+export const copilotAuditEvents = sqliteTable('copilot_audit_events', {
+  id: text('id').primaryKey(),
+  projectId: text('project_id').notNull(),
+  ts: text('ts').notNull(),
+  eventType: text('event_type').notNull(),
+  tool: text('tool'),
+  ok: integer('ok'),
+  durationMs: integer('duration_ms'),
+  summary: text('summary'),
+  detailsJson: text('details_json').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+});
+
+export const copilotPlanRuns = sqliteTable('copilot_plan_runs', {
+  id: text('id').primaryKey(),
+  projectId: text('project_id').notNull(),
+  status: text('status').notNull(),
+  planJson: text('plan_json').notNull().default('{}'),
+  contextJson: text('context_json').notNull().default('{}'),
+  errorMessage: text('error_message'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+  startedAt: text('started_at'),
+  endedAt: text('ended_at'),
+});
+
+export const copilotPlanSteps = sqliteTable('copilot_plan_steps', {
+  id: text('id').primaryKey(),
+  runId: text('run_id').notNull(),
+  projectId: text('project_id').notNull(),
+  stepIndex: integer('step_index').notNull(),
+  stepId: text('step_id').notNull(),
+  title: text('title').notNull(),
+  tool: text('tool').notNull(),
+  status: text('status').notNull(),
+  paramsJson: text('params_json').notNull().default('{}'),
+  resultJson: text('result_json').notNull().default(''),
+  errorJson: text('error_json').notNull().default(''),
+  startedAt: text('started_at'),
+  endedAt: text('ended_at'),
+  updatedAt: text('updated_at').notNull(),
+});
+
+export const copilotContextCache = sqliteTable('copilot_context_cache', {
+  id: text('id').primaryKey(),
+  projectId: text('project_id').notNull(),
+  contextType: text('context_type').notNull(), // e.g., 'asset', 'workflow', 'run'
+  itemId: text('item_id').notNull(),
+  content: text('content').notNull(), // searchable text
+  indexedAt: text('indexed_at').notNull(),
+});
+
+// Persistent semantic index for Copilot retrieval (normalized embeddings stored as JSON arrays).
+// This intentionally keeps storage simple (SQLite TEXT) and runs similarity ranking in-process.
+export const copilotVectorIndex = sqliteTable('copilot_vector_index', {
+  id: text('id').primaryKey(), // deterministic: `${projectId}:${contextType}:${itemId}:${model}`
+  projectId: text('project_id').notNull(),
+  contextType: text('context_type').notNull(), // e.g., 'asset', 'workflow'
+  itemId: text('item_id').notNull(),
+  itemVersionId: text('item_version_id'), // e.g., assetVersionId / workflowVersionId
+  chunkId: text('chunk_id').notNull().default('0'), // '0' for single-chunk legacy rows
+  chunkIndex: integer('chunk_index').notNull().default(0),
+  chunkCount: integer('chunk_count').notNull().default(1),
+  model: text('model').notNull(),
+  dim: integer('dim').notNull(),
+  embeddingJson: text('embedding_json').notNull(), // normalized vector
+  content: text('content').notNull().default(''), // text used to embed (clipped)
+  contentHash: text('content_hash').notNull().default(''), // hash of `content` + model
+  sourceUpdatedAt: text('source_updated_at').notNull().default(''), // source item updated timestamp/version
+  indexedAt: text('indexed_at').notNull(),
+});

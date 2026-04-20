@@ -37,7 +37,7 @@ export const usePanelStore = create<PanelState & PanelActions>()(
       setRightPanelOpen: open => set({ rightPanelOpen: open }),
       toggleRightPanel: () => set(state => ({ rightPanelOpen: !state.rightPanelOpen })),
       setRightPanelTab: tab => set({ rightPanelTab: tab, rightPanelOpen: true }),
-      setRightPanelWidth: width => set({ rightPanelWidth: Math.max(280, Math.min(600, width)) }),
+      setRightPanelWidth: width => set({ rightPanelWidth: Math.max(280, Math.min(900, width)) }),
 
       setBottomDockExpanded: expanded => set({ bottomDockExpanded: expanded }),
       toggleBottomDock: () => set(state => ({ bottomDockExpanded: !state.bottomDockExpanded })),
@@ -53,7 +53,7 @@ export const usePanelStore = create<PanelState & PanelActions>()(
         const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
         const safeWidth =
           typeof persistedState.rightPanelWidth === 'number' && Number.isFinite(persistedState.rightPanelWidth)
-            ? clamp(persistedState.rightPanelWidth, 280, 600)
+            ? clamp(persistedState.rightPanelWidth, 280, 900)
             : current.rightPanelWidth;
         const safeBottomHeight =
           typeof persistedState.bottomDockHeight === 'number' && Number.isFinite(persistedState.bottomDockHeight)

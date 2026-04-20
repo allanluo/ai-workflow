@@ -8,3 +8,6 @@ export * from './workflows.js';
 export * from './runs.js';
 export * from './reviews.js';
 export * from './links.js';
+export * from './copilot.js';
+export * from './copilotPlanRuns.js';
+export * from './copilotVectorIndex.js';

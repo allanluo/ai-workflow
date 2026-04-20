@@ -881,8 +881,7 @@ export function Sidebar() {
     <aside
       className={`bg-[var(--bg-base)] border-r border-[var(--border-light)] flex flex-col z-20 transition-all duration-200 ${
         sidebarCollapsed ? 'w-14' : 'w-60'
-      }`}
-      style={{ height: 'calc(100vh - 48px)' }}
+      } h-full`}
     >
       {projectId ? <ProjectSidebarContent /> : <HomeSidebarContent />}
     </aside>

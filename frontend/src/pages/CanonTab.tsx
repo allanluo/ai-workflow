@@ -718,7 +718,7 @@ export function CanonTab({ projectId }: CanonTabProps) {
           const personality = typeof co.personality === 'string' ? co.personality : undefined;
 
           let appearance: CanonCharacterAppearance | undefined;
-          if (co.appearance && typeof co.appearance === 'object') {
+          if (co.appearance && typeof co.appearance === 'object' && !Array.isArray(co.appearance)) {
             const ao = co.appearance as Record<string, unknown>;
             const next: CanonCharacterAppearance = {};
             const fields: (keyof CanonCharacterAppearance)[] = [
@@ -730,7 +730,12 @@ export function CanonTab({ projectId }: CanonTabProps) {
               'accessories',
             ];
             for (const key of fields) {
-              if (typeof ao[key] === 'string' && ao[key]) next[key] = ao[key] as string;
+              if (typeof ao[key] === 'string' && ao[key]) {
+                const v = String(ao[key]).trim();
+                if (!v) continue;
+                if (v.toLowerCase() === 'unspecified' || v.toLowerCase() === 'unknown') continue;
+                next[key] = v;
+              }
             }
             if (Object.keys(next).length > 0) appearance = next;
           }
@@ -990,10 +995,10 @@ export function CanonTab({ projectId }: CanonTabProps) {
                           {char.personality}
                         </p>
                       )}
-                      {char.appearance && (
+                      {char.appearance && !Array.isArray(char.appearance) && (
                         <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-[var(--text-muted)]">
                           {Object.entries(char.appearance).map(([k, v]) =>
-                            typeof v === 'string' && v ? (
+                            typeof v === 'string' && v && String(v).trim() && !['unspecified', 'unknown'].includes(String(v).trim().toLowerCase()) ? (
                               <div key={k} className="truncate">
                                 <span className="font-semibold text-[var(--text-secondary)]">
                                   {k}:

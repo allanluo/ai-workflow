@@ -15,6 +15,8 @@ import { registerProjectRoutes } from './routes/projects.js';
 import { registerWorkflowRoutes } from './routes/workflows.js';
 import { registerReviewRoutes } from './routes/reviews.js';
 import { registerLinkRoutes } from './routes/links.js';
+import { registerCopilotRoutes } from './routes/copilot.js';
+import { registerCopilotRunRoutes } from './routes/copilotRuns.js';
 
 export async function buildApp() {
   initializeDatabase();
@@ -117,6 +119,8 @@ export async function buildApp() {
       await api.register(registerWorkflowRoutes);
       await api.register(registerReviewRoutes);
       await api.register(registerLinkRoutes);
+      await api.register(registerCopilotRoutes);
+      await api.register(registerCopilotRunRoutes);
     },
     { prefix: '/api/v1' }
   );
