@@ -2,12 +2,12 @@ import type { Asset } from './api';
 
 export type ShotPlanItem = {
   id?: string;
-  shotNumber?: string | number;
+  shot_number?: string | number;
   description?: string;
   framing?: string;
   angle?: string;
   motion?: string;
-  continuityNotes?: string;
+  continuity_notes?: string;
   image?: {
     prompt_structured?: string;
     prompt?: string;
@@ -86,6 +86,10 @@ export function ensureShotIdsInPlan(plan: Record<string, unknown>, planId: strin
     if (!shot || typeof shot !== 'object') return;
     if (typeof shot.id === 'string' && shot.id.trim()) return;
     shot.id = `${planId}:${flatIndex}`;
+    // Migration: ensure shot_number exists if shotNumber was there
+    if ((shot as any).shotNumber && !shot.shot_number) {
+      shot.shot_number = (shot as any).shotNumber;
+    }
   };
 
   const scenesRaw = plan.scenes;

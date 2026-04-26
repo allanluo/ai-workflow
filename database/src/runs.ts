@@ -9,6 +9,7 @@ import {
   workflowRuns,
   workflowVersions,
 } from './schema.js';
+import { createAssetVersion } from './assets.js';
 
 type WorkflowRunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 type NodeRunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'skipped';
@@ -128,6 +129,18 @@ function getWorkflowRunRow(workflowRunId: string) {
   return db.select().from(workflowRuns).where(eq(workflowRuns.id, workflowRunId)).get();
 }
 
+export function addWorkflowRunLog(workflowRunId: string, message: string) {
+  const row = getWorkflowRunRow(workflowRunId);
+  if (!row) return;
+
+  db.update(workflowRuns)
+    .set({
+      logsJson: appendStringLog(row.logsJson, message),
+    })
+    .where(eq(workflowRuns.id, workflowRunId))
+    .run();
+}
+
 function getNodeRunRow(nodeRunId: string) {
   return db.select().from(nodeRuns).where(eq(nodeRuns.id, nodeRunId)).get();
 }
@@ -217,6 +230,7 @@ export function getWorkflowRunExecutionContext(workflowRunId: string) {
   return {
     workflow_run_id: workflowRun.id,
     workflow_version_id: workflowRun.workflowVersionId,
+    workflow_id: workflowVersion.workflowDefinitionId,
     project_id: workflowRun.projectId,
     version_number: workflowVersion.versionNumber,
     resolved_input_snapshot: safeParseJson(workflowRun.resolvedInputSnapshotJson, {}),
@@ -567,13 +581,23 @@ interface CreateAssetFromNodeOutputInput {
   workflow_run_id: string;
   node_run_id: string;
   node_type: string;
+  catalog_key?: string;
+  workflow_id?: string;
   output: Record<string, unknown>;
 }
 
 export function createAssetFromNodeOutput(input: CreateAssetFromNodeOutputInput) {
   const timestamp = new Date().toISOString();
-  const { project_id, workflow_version_id, workflow_run_id, node_run_id, node_type, output } =
-    input;
+  const {
+    project_id,
+    workflow_version_id,
+    workflow_run_id,
+    node_run_id,
+    node_type,
+    catalog_key,
+    workflow_id,
+    output,
+  } = input;
 
   const assetTypeMap: Record<string, { type: string; category: string; autoApprove?: boolean }> = {
     // Input nodes - creates source asset
@@ -603,9 +627,132 @@ export function createAssetFromNodeOutput(input: CreateAssetFromNodeOutputInput)
     generate_video: { type: 'generated_video', category: 'visual' },
   };
 
-  const assetInfo = assetTypeMap[node_type];
+  let assetInfo = assetTypeMap[node_type];
+
+  // Catalog priority: If we have a specific catalog key, use that to override the generic runtime type
+  if (catalog_key && assetTypeMap[catalog_key]) {
+    assetInfo = assetTypeMap[catalog_key];
+  }
+
+  // Auto-unzip JSON strings from LLM text outputs to ensure structured data is at the root
+  let finalOutput = { ...output };
+  if (typeof output.text === 'string') {
+    const trimmed = output.text.trim();
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        finalOutput = { ...finalOutput, ...parsed };
+      } catch (e) {
+        // Not valid JSON, or just looks like it. Keep as is.
+      }
+    }
+  }
+
+  // If node_type is generic (like llm_text), try to infer the specific asset type from the output structure
+  if (node_type === 'llm_text' || node_type === 'llm' || node_type === 'output') {
+    if (finalOutput && typeof finalOutput === 'object') {
+      const out = finalOutput as Record<string, unknown>;
+      if (
+        Array.isArray(out.shots) ||
+        (Array.isArray(out.scenes) && out.scenes.some((s: any) => Array.isArray(s.shots)))
+      ) {
+        assetInfo = assetTypeMap['generate_shot_plan'];
+      } else if (Array.isArray(out.scenes)) {
+        assetInfo = assetTypeMap['generate_scenes'];
+      } else if (
+        out.characters ||
+        out.locations ||
+        out.world_rules ||
+        out.character_table ||
+        out.environment_lock ||
+        out.source_summary
+      ) {
+        assetInfo = assetTypeMap['extract_canon'];
+      }
+    }
+  }
+
   if (!assetInfo) {
-    return null;
+    // Fallback: If it's a generative node type but we couldn't match a specific asset structure,
+    // at least save it as generic "generated_text" so it's not lost.
+    if (['llm', 'llm_text', 'output'].includes(node_type)) {
+      assetInfo = assetTypeMap['llm_text'];
+    } else {
+      return null;
+    }
+  }
+
+  // Use the provided workflow_id directly if available to ensure correct tagging even for draft runs
+  let workflowId = workflow_id || null;
+
+  if (!workflowId) {
+    const wfVersion = getWorkflowVersionRow(workflow_version_id);
+    workflowId = wfVersion?.workflowDefinitionId ?? null;
+  }
+
+  // Search for an existing asset of this type for this specific workflow
+  const existingAssets = db.select().from(assets).where(
+    and(
+      eq(assets.projectId, project_id),
+      eq(assets.assetType, assetInfo.type)
+    )
+  ).all();
+
+  const existingAsset = existingAssets.find(a => {
+    const meta = safeParseJson<Record<string, any>>(a.metadataJson, {});
+    return meta.workflow_id === workflowId;
+  });
+
+  if (existingAsset) {
+    const version = createAssetVersion(existingAsset.id, {
+      content: finalOutput,
+      source_mode: 'workflow',
+      status: 'ready',
+      make_current: true,
+      metadata: {
+        node_type,
+        workflow_id: workflowId,
+        catalog_key: catalog_key || null,
+        workflow_run_id: workflow_run_id,
+        node_run_id: node_run_id,
+      },
+    });
+
+    if (assetInfo.autoApprove && version) {
+      db.update(assetVersions)
+        .set({ approvalState: 'approved' })
+        .where(eq(assetVersions.id, version.id))
+        .run();
+      
+      db.update(assets)
+        .set({ 
+          approvalState: 'approved',
+          currentApprovedAssetVersionId: version.id,
+          updatedAt: timestamp
+        })
+        .where(eq(assets.id, existingAsset.id))
+        .run();
+    }
+
+    insertProjectEvent({
+      projectId: project_id,
+      eventType: 'asset_version_created_from_workflow',
+      targetType: 'asset',
+      targetId: existingAsset.id,
+      workflowRunId: workflow_run_id,
+      nodeRunId: node_run_id,
+      payload: {
+        asset_id: existingAsset.id,
+        asset_version_id: version?.id,
+        node_type,
+        version_number: version?.version_number,
+      },
+    });
+
+    return {
+      asset_id: existingAsset.id,
+      asset_version_id: version?.id,
+    };
   }
 
   const assetId = randomUUID();
@@ -626,6 +773,10 @@ export function createAssetFromNodeOutput(input: CreateAssetFromNodeOutputInput)
       createdBy: 'workflow',
       createdAt: timestamp,
       updatedAt: timestamp,
+      metadataJson: JSON.stringify({
+        workflow_id: workflowId,
+        catalog_key: catalog_key || null,
+      }),
     })
     .run();
 
@@ -643,9 +794,11 @@ export function createAssetFromNodeOutput(input: CreateAssetFromNodeOutputInput)
       workflowVersionId: workflow_version_id,
       workflowRunId: workflow_run_id,
       nodeRunId: node_run_id,
-      contentJson: JSON.stringify(output),
+      contentJson: JSON.stringify(finalOutput),
       metadataJson: JSON.stringify({
         node_type,
+        workflow_id: workflowId,
+        catalog_key: catalog_key || null,
       }),
       createdBy: 'workflow',
       createdAt: timestamp,

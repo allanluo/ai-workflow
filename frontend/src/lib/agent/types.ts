@@ -112,6 +112,7 @@ export interface ParsedIntent {
 
 export type SkillName =
   | 'createWorkflow'
+  | 'updateWorkflowStoryInput'
   | 'addScene'
   | 'improveShotPrompt'
   | 'generateCanon'

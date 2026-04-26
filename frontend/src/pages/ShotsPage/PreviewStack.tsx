@@ -21,13 +21,14 @@ import {
   updateShotImageOverrideInPlan,
   writeBackShotPlan,
 } from '../../lib/shotPlanEditing';
+import { isCanonLike } from '../../lib/agent/context/buildContext';
 
 interface PreviewStackProps {
   projectId: string;
   shot: Shot;
 }
 
-type PreviewTab = 'image' | 'video';
+type PreviewTab = 'image' | 'video' | 'image_to_video';
 
 type StoredShotMedia = Record<
   string,
@@ -55,9 +56,11 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
   const [videoByShotId, setVideoByShotId] = useState<Record<string, string>>({});
   const [videoJobByShotId, setVideoJobByShotId] = useState<Record<string, string>>({});
   const [videoJobStatusByShotId, setVideoJobStatusByShotId] = useState<Record<string, string>>({});
+  const [imageJobByShotId, setImageJobByShotId] = useState<Record<string, string>>({});
+  const [imageJobStatusByShotId, setImageJobStatusByShotId] = useState<Record<string, string>>({});
   const [hydratedForProjectId, setHydratedForProjectId] = useState<string | null>(null);
   const [promptDraft, setPromptDraft] = useState('');
-  const [negativePromptDraft, setNegativePromptDraft] = useState('');
+  const [negative_prompt_draft, setNegativePromptDraft] = useState('');
   const [isPromptDirty, setIsPromptDirty] = useState(false);
   const [isSavingPrompt, setIsSavingPrompt] = useState(false);
   const setRightPanelTab = usePanelStore(s => s.setRightPanelTab);
@@ -71,6 +74,8 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
   const videoUrl = videoByShotId[shot.id] || '';
   const videoJobId = videoJobByShotId[shot.id] || '';
   const videoJobStatus = videoJobStatusByShotId[shot.id] || '';
+  const imageJobId = imageJobByShotId[shot.id] || '';
+  const imageJobStatus = imageJobStatusByShotId[shot.id] || '';
 
   const canGenerate = Boolean(projectId) && Boolean(shot?.id);
   const videoJobStatusLower = (videoJobStatus || '').toLowerCase();
@@ -84,6 +89,17 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
     videoJobStatusLower === 'canceled';
   const videoJobIsActive = Boolean(videoJobId) && !videoJobIsTerminal && !videoUrl;
 
+  const imageJobStatusLower = (imageJobStatus || '').toLowerCase();
+  const imageJobIsTerminal =
+    imageJobStatusLower === 'completed' ||
+    imageJobStatusLower === 'success' ||
+    imageJobStatusLower === 'succeeded' ||
+    imageJobStatusLower === 'failed' ||
+    imageJobStatusLower === 'error' ||
+    imageJobStatusLower === 'cancelled' ||
+    imageJobStatusLower === 'canceled';
+  const imageJobIsActive = Boolean(imageJobId) && !imageJobIsTerminal && !imageUrl;
+
   const clearVideoJobState = () => {
     setVideoJobByShotId(prev => {
       if (!prev[shot.id]) return prev;
@@ -92,6 +108,21 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
       return next;
     });
     setVideoJobStatusByShotId(prev => {
+      if (!prev[shot.id]) return prev;
+      const next = { ...prev };
+      delete next[shot.id];
+      return next;
+    });
+  };
+
+  const clearImageJobState = () => {
+    setImageJobByShotId(prev => {
+      if (!prev[shot.id]) return prev;
+      const next = { ...prev };
+      delete next[shot.id];
+      return next;
+    });
+    setImageJobStatusByShotId(prev => {
       if (!prev[shot.id]) return prev;
       const next = { ...prev };
       delete next[shot.id];
@@ -192,8 +223,8 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
   ]);
 
   const canonQuery = useQuery<Asset[]>({
-    queryKey: ['project-assets', projectId, 'canon_text'],
-    queryFn: () => fetchProjectAssets(projectId, 'canon_text'),
+    queryKey: ['project-assets', projectId, 'canon-candidates'],
+    queryFn: () => fetchProjectAssets(projectId), // Fetch all and filter client-side for flexibility
     enabled: Boolean(projectId),
   });
 
@@ -204,10 +235,11 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
   });
 
   const latestCanonAsset = useMemo(() => {
+
     const items = canonQuery.data ?? [];
     return (
       [...items]
-        .filter(a => a.status !== 'deprecated')
+        .filter(a => a.status !== 'deprecated' && isCanonLike(a))
         .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())[0] ??
       null
     );
@@ -229,14 +261,14 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
   const effectivePrompt = useMemo(() => {
     const parts = [
       shot.sceneId ? `Scene: ${shot.sceneId}.` : null,
-      shot.shotType ? `Framing: ${shot.shotType}.` : null,
+      shot.shot_type ? `Framing: ${shot.shot_type}.` : null,
       shot.angle ? `Angle: ${shot.angle}.` : null,
       shot.motion ? `Motion: ${shot.motion}.` : null,
       shot.prompt ? shot.prompt : null,
     ].filter(Boolean);
 
     return parts.join(' ').trim();
-  }, [shot.angle, shot.motion, shot.prompt, shot.sceneId, shot.shotType]);
+  }, [shot.angle, shot.motion, shot.prompt, shot.sceneId, shot.shot_type]);
 
   const sceneInfo = useMemo(() => {
     const asset = latestScenesBatchAsset;
@@ -262,15 +294,9 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
 
     const title = typeof match.title === 'string' ? match.title.trim() : '';
     const setting = typeof match.setting === 'string' ? match.setting.trim() : '';
-    const emotionalBeat =
-      typeof match.emotionalBeat === 'string'
-        ? match.emotionalBeat.trim()
-        : typeof match.emotional_beat === 'string'
-          ? String(match.emotional_beat).trim()
-          : '';
-
-    if (!title && !setting && !emotionalBeat) return null;
-    return { title, setting, emotionalBeat };
+    const emotional_beat = typeof match.emotional_beat === 'string' ? match.emotional_beat.trim() : typeof match.emotionalBeat === 'string' ? match.emotionalBeat.trim() : '';
+    if (!title && !setting && !emotional_beat) return null;
+    return { title, setting, emotional_beat };
   }, [latestScenesBatchAsset, shot.sceneId]);
 
   const canonInfo = useMemo(() => {
@@ -289,35 +315,59 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
 
     const tone = getString('tone');
     const themes = getStringArray('themes').slice(0, 5);
-    const worldRules = (getStringArray('worldRules').length ? getStringArray('worldRules') : getStringArray('world_rules')).slice(0, 6);
-    const colorPalette = (getStringArray('colorPalette').length ? getStringArray('colorPalette') : getStringArray('color_palette')).slice(0, 6);
+    const world_rules = (getStringArray('world_rules').length ? getStringArray('world_rules') : getStringArray('worldRules')).slice(0, 6);
+    const color_palette = (getStringArray('color_palette').length ? getStringArray('color_palette') : getStringArray('colorPalette')).slice(0, 6);
+    const environment_lock = (getString('environment_lock') || getString('environmentLock')).slice(0, 500);
 
     const shotText = `${effectivePrompt}`.toLowerCase();
 
     const charactersRaw = Array.isArray(content.characters)
       ? (content.characters.filter(v => v && typeof v === 'object') as Record<string, unknown>[])
-      : [];
+      : Array.isArray(content.character_table)
+        ? (content.character_table.filter(v => v && typeof v === 'object') as Record<string, unknown>[])
+        : [];
+    
+    const allan = charactersRaw.find(c => {
+      const name = (typeof c.name === 'string' ? c.name.trim().toLowerCase() : '');
+      return name === 'allan' || name === 'allan (protagonist)';
+    }) ?? null;
+    
     const matchedCharacters = charactersRaw
       .filter(c => {
         const name = typeof c.name === 'string' ? c.name.trim() : '';
-        return name && shotText.includes(name.toLowerCase());
+        if (!name) return false;
+        const lowerName = name.toLowerCase();
+        if (lowerName === 'allan' || lowerName === 'allan (protagonist)') return false;
+        return shotText.includes(lowerName);
       })
-      .slice(0, 3);
-    const characters = matchedCharacters
+      .slice(0, 2);
+    const pickedCharacters = [allan, ...matchedCharacters].filter(Boolean).slice(0, 3) as Record<string, unknown>[];
+    const characters = pickedCharacters
       .map(c => {
         const name = typeof c.name === 'string' ? c.name.trim() : '';
         const description = typeof c.description === 'string' ? c.description.trim() : '';
-        const appearance =
-          c.appearance && typeof c.appearance === 'object'
-            ? (c.appearance as Record<string, unknown>)
-            : null;
-        const appearanceBits = appearance
-          ? (['face', 'hair', 'clothing', 'shoes', 'hat', 'accessories'] as const)
-              .map(k =>
-                typeof appearance[k] === 'string' ? `${k}: ${String(appearance[k]).trim()}` : null
-              )
-              .filter(Boolean)
-          : [];
+        let appearanceBits: string[] = [];
+        const app = c.appearance;
+        if (Array.isArray(app)) {
+          appearanceBits = app.filter(v => typeof v === 'string').map(v => v.trim()).filter(Boolean);
+        } else if (app && typeof app === 'object') {
+          appearanceBits = Object.entries(app as Record<string, unknown>)
+            .map(([k, v]) => (typeof v === 'string' && v.trim() ? `${k}: ${v.trim()}` : null))
+            .filter(Boolean) as string[];
+        } else if (typeof app === 'string' && app.trim()) {
+          appearanceBits = [app.trim()];
+        }
+
+        if (appearanceBits.length === 0) {
+          const legacyKeys = ['facial_features', 'face', 'hair', 'dress', 'clothing', 'shoes', 'hat', 'accessories'] as const;
+          appearanceBits = legacyKeys
+            .map(k => (typeof c[k] === 'string' && (c[k] as string).trim() ? `${k}: ${(c[k] as string).trim()}` : null))
+            .filter(Boolean) as string[];
+        }
+
+        if (appearanceBits.length === 0 && typeof c.character_image === 'string' && c.character_image.trim()) {
+          appearanceBits = [c.character_image.trim()];
+        }
         return {
           name,
           description,
@@ -343,8 +393,9 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
     if (
       !tone &&
       themes.length === 0 &&
-      worldRules.length === 0 &&
-      colorPalette.length === 0 &&
+      world_rules.length === 0 &&
+      color_palette.length === 0 &&
+      !environment_lock &&
       characters.length === 0 &&
       locationNames.length === 0 &&
       equipmentNames.length === 0
@@ -355,8 +406,9 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
     return {
       tone,
       themes,
-      worldRules,
-      colorPalette,
+      world_rules,
+      color_palette,
+      environment_lock,
       characters,
       locations: locationNames.slice(0, 8),
       equipment: equipmentNames.slice(0, 8),
@@ -369,11 +421,12 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
     if (canonInfo) {
       if (canonInfo.tone) lines.push(`  tone: ${canonInfo.tone}`);
       if (canonInfo.themes.length) lines.push(`  themes: [${canonInfo.themes.join(', ')}]`);
-      if (canonInfo.colorPalette.length)
-        lines.push(`  color_palette: [${canonInfo.colorPalette.join(', ')}]`);
-      if (canonInfo.worldRules.length) {
+      if (canonInfo.color_palette.length)
+        lines.push(`  color_palette: [${canonInfo.color_palette.join(', ')}]`);
+      if (canonInfo.environment_lock) lines.push(`  environment_lock: ${canonInfo.environment_lock}`);
+      if (canonInfo.world_rules.length) {
         lines.push('  world_rules:');
-        for (const rule of canonInfo.worldRules) lines.push(`    - ${rule}`);
+        for (const rule of canonInfo.world_rules) lines.push(`    - ${rule}`);
       }
       if (canonInfo.locations.length) lines.push(`  locations: [${canonInfo.locations.join(', ')}]`);
       if (canonInfo.equipment.length) lines.push(`  equipment: [${canonInfo.equipment.join(', ')}]`);
@@ -396,7 +449,7 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
     if (sceneInfo) {
       if (sceneInfo.title) lines.push(`  title: ${sceneInfo.title}`);
       if (sceneInfo.setting) lines.push(`  setting: ${sceneInfo.setting}`);
-      if (sceneInfo.emotionalBeat) lines.push(`  emotional_beat: ${sceneInfo.emotionalBeat}`);
+      if (sceneInfo.emotional_beat) lines.push(`  emotional_beat: ${sceneInfo.emotional_beat}`);
     } else {
       lines.push('  (none)');
     }
@@ -404,11 +457,11 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
     lines.push('');
     lines.push('SHOT:');
     if (shot.sceneId) lines.push(`  scene: ${shot.sceneId}`);
-    if (shot.shotType) lines.push(`  framing: ${shot.shotType}`);
+    if (shot.shot_type) lines.push(`  framing: ${shot.shot_type}`);
     if (shot.angle) lines.push(`  angle: ${shot.angle}`);
     if (shot.motion) lines.push(`  motion: ${shot.motion}`);
     if (shot.prompt) lines.push(`  description: ${shot.prompt}`);
-    if (shot.negativePrompt) lines.push(`  negative: ${shot.negativePrompt}`);
+    if (shot.negative_prompt) lines.push(`  negative: ${shot.negative_prompt}`);
 
     lines.push('');
     lines.push('INSTRUCTIONS:');
@@ -420,17 +473,17 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
   }, [canonInfo, sceneInfo, shot]);
 
   const generationPrompt = useMemo(() => {
-    const override = (shot.generatorPrompt || '').trim();
+    const override = (shot.generator_prompt || '').trim();
     return override || assembledPrompt;
-  }, [assembledPrompt, shot.generatorPrompt]);
+  }, [assembledPrompt, shot.generator_prompt]);
 
   useEffect(() => {
     // Re-hydrate manual draft when shot changes or generator prompt updates.
-    const base = (shot.generatorPrompt || '').trim() || generationPrompt;
+    const base = (shot.generator_prompt || '').trim() || generationPrompt;
     setPromptDraft(base);
-    setNegativePromptDraft((shot.generatorNegativePrompt || '').trim());
+    setNegativePromptDraft((shot.generator_negative_prompt || '').trim());
     setIsPromptDirty(false);
-  }, [generationPrompt, shot.generatorNegativePrompt, shot.generatorPrompt, shot.id]);
+  }, [generationPrompt, shot.generator_negative_prompt, shot.generator_prompt, shot.id]);
 
   const effectivePromptForGeneration = useMemo(() => {
     const draft = promptDraft.trim();
@@ -438,17 +491,17 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
   }, [generationPrompt, promptDraft]);
 
   const generationPromptForApi = useMemo(() => {
-    const negative = (negativePromptDraft || shot.generatorNegativePrompt || '').trim();
+    const negative = (negative_prompt_draft || shot.generator_negative_prompt || '').trim();
     if (!negative) return effectivePromptForGeneration;
     if (effectivePromptForGeneration.toLowerCase().includes('negative_prompt:'))
       return effectivePromptForGeneration;
     return `${effectivePromptForGeneration}\n\nNEGATIVE_PROMPT:\n${negative}`;
-  }, [effectivePromptForGeneration, negativePromptDraft, shot.generatorNegativePrompt]);
+  }, [effectivePromptForGeneration, negative_prompt_draft, shot.generator_negative_prompt]);
 
   // Legacy name used by older UI paths (and can be helpful for debugging).
   const promptDisplay = (() => {
-    const structured = (shot.generatorPromptStructured || '').trim();
-    const negative = (negativePromptDraft || shot.generatorNegativePrompt || '').trim();
+    const structured = (shot.generator_prompt_structured || '').trim();
+    const negative = (negative_prompt_draft || shot.generator_negative_prompt || '').trim();
     const parts: string[] = [];
     if (structured) parts.push(structured);
     if (negative) parts.push(`NEGATIVE_PROMPT:\n${negative}`);
@@ -495,8 +548,8 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
 
       updateShotImageOverrideInPlan(plan, located, {
         prompt,
-        negative_prompt: negativePromptDraft.trim() || undefined,
-        prompt_structured: (shot.generatorPromptStructured || '').trim() || undefined,
+        negative_prompt: negative_prompt_draft.trim() || undefined,
+        prompt_structured: (shot.generator_prompt_structured || '').trim() || undefined,
         width: 1280,
         height: 720,
         last_updated_by: 'manual',
@@ -526,14 +579,6 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
   };
 
   useEffect(() => {
-    if (!videoJobId) return;
-    if (videoJobStatus === 'completed' || videoJobStatus === 'failed' || videoJobStatus === 'error') {
-      clearVideoJobState();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [videoJobId, videoJobStatus, shot.id]);
-
-  useEffect(() => {
     // If we already have a video URL, any lingering job id is stale and should not block UI actions.
     if (!videoUrl) return;
     if (!videoJobId) return;
@@ -555,13 +600,10 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
       if (isGenerating) return;
       setIsGenerating(true);
       try {
-        const promptForApi =
-          pending.negativePrompt && pending.negativePrompt.trim()
-            ? `${pending.prompt}\n\nNEGATIVE_PROMPT:\n${pending.negativePrompt.trim()}`
-            : pending.prompt;
         const result = await generateCharacterImage({
           projectId,
-          prompt: promptForApi,
+          prompt: pending.prompt,
+          negativePrompt: pending.negative_prompt,
           width: pending.width,
           height: pending.height,
         });
@@ -607,9 +649,11 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
     setIsGenerating(true);
     try {
       if (activeTab === 'image') {
+        const negative = (negative_prompt_draft || shot.generator_negative_prompt || '').trim();
         const result = await generateCharacterImage({
           projectId,
-          prompt: generationPromptForApi,
+          prompt: effectivePromptForGeneration,
+          negativePrompt: negative || undefined,
           width: 1280,
           height: 720,
         });
@@ -619,9 +663,12 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
             title: 'Image queued',
             message: `Job ${result.job_id} started (no image URL yet).`,
           });
+          setImageJobByShotId(prev => ({ ...prev, [shot.id]: result.job_id }));
+          setImageJobStatusByShotId(prev => ({ ...prev, [shot.id]: result.status }));
           return;
         }
         setImageByShotId(prev => ({ ...prev, [shot.id]: result.image_url! }));
+        clearImageJobState();
       } else {
         // Clear old preview so the user sees job progress for the new generation.
         setVideoByShotId(prev => ({ ...prev, [shot.id]: '' }));
@@ -634,7 +681,11 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
         });
         setVideoJobByShotId(prev => ({ ...prev, [shot.id]: result.job_id }));
         setVideoJobStatusByShotId(prev => ({ ...prev, [shot.id]: result.status }));
-        if (!result.video_url) {
+
+        // Check for URL in both top-level and potential nested structures in the initial result
+        const initialUrl = result.video_url || (result as any).videoUrl || (result as any).url;
+
+        if (!initialUrl) {
           showToast({
             type: 'warning',
             title: 'Video queued',
@@ -642,7 +693,7 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
           });
           return;
         }
-        setVideoByShotId(prev => ({ ...prev, [shot.id]: result.video_url! }));
+        setVideoByShotId(prev => ({ ...prev, [shot.id]: initialUrl }));
         clearVideoJobState();
       }
     } catch (err) {
@@ -687,7 +738,9 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
       setVideoJobByShotId(prev => ({ ...prev, [shot.id]: result.job_id }));
       setVideoJobStatusByShotId(prev => ({ ...prev, [shot.id]: result.status }));
 
-      if (!result.video_url) {
+      const initialUrl = result.video_url || (result as any).videoUrl || (result as any).url;
+
+      if (!initialUrl) {
         showToast({
           type: 'warning',
           title: 'Video queued',
@@ -695,7 +748,7 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
         });
         return;
       }
-      setVideoByShotId(prev => ({ ...prev, [shot.id]: result.video_url! }));
+      setVideoByShotId(prev => ({ ...prev, [shot.id]: initialUrl }));
       clearVideoJobState();
     } catch (err) {
       showToast({
@@ -732,13 +785,50 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
       if (typeof v.url === 'string') return v.url;
     }
 
+    // Check top-level properties of the job object itself
+    const top = job as unknown as Record<string, unknown>;
+    if (typeof top.video_url === 'string') return top.video_url;
+    if (typeof top.videoUrl === 'string') return top.videoUrl;
+    if (typeof top.url === 'string') return top.url;
+
+    return null;
+  };
+
+  const extractImageUrlFromJob = (job: JobStatus): string | null => {
+    const artifacts = job.artifacts;
+    if (!artifacts || typeof artifacts !== 'object') return null;
+
+    const direct = artifacts as Record<string, unknown>;
+    const directUrl =
+      typeof direct.image_url === 'string'
+        ? direct.image_url
+        : typeof direct.imageUrl === 'string'
+          ? (direct.imageUrl as string)
+          : typeof direct.url === 'string'
+            ? (direct.url as string)
+            : null;
+    if (directUrl) return directUrl;
+
+    const candidate = direct.image;
+    if (candidate && typeof candidate === 'object') {
+      const v = candidate as Record<string, unknown>;
+      if (typeof v.image_url === 'string') return v.image_url;
+      if (typeof v.url === 'string') return v.url;
+    }
+
+    // Check top-level properties of the job object itself
+    const top = job as unknown as Record<string, unknown>;
+    if (typeof top.image_url === 'string') return top.image_url;
+    if (typeof top.imageUrl === 'string') return top.imageUrl;
+    if (typeof top.url === 'string') return top.url;
+
     return null;
   };
 
   useEffect(() => {
     if (!videoJobId) return;
     if (videoUrl) return;
-    if (activeTab !== 'video') return;
+    if (activeTab !== 'video' && activeTab !== 'image_to_video') return;
 
     let cancelled = false;
     let interval: number | undefined;
@@ -747,38 +837,35 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
       try {
         const job = await fetchJobStatus(videoJobId);
         if (cancelled) return;
-        setVideoJobStatusByShotId(prev => ({ ...prev, [shot.id]: job.status }));
+        const status = (job.status || '').toLowerCase();
+        setVideoJobStatusByShotId(prev => ({ ...prev, [shot.id]: status }));
 
-        if (job.status === 'completed') {
+        if (status === 'completed' || status === 'success' || status === 'succeeded') {
           const url = extractVideoUrlFromJob(job);
           if (url) {
             setVideoByShotId(prev => ({ ...prev, [shot.id]: url }));
             clearVideoJobState();
             showToast({ type: 'success', title: 'Video ready', message: 'Video generated.' });
+            if (interval) window.clearInterval(interval);
+            interval = undefined;
           } else {
-            showToast({
-              type: 'warning',
-              title: 'Video completed',
-              message: 'Job completed but no video URL was returned.',
-            });
-            clearVideoJobState();
+            // If completed but no URL, keep polling for a few more cycles in case artifacts are lagging
+            console.warn('[VideoPoll] Job completed but URL missing. Continuing to poll...');
           }
         }
 
-        if (job.status === 'completed' || job.status === 'failed' || job.status === 'error') {
+        if (status === 'failed' || status === 'error') {
           if (interval) window.clearInterval(interval);
           interval = undefined;
-          if (job.status === 'failed' || job.status === 'error') {
-            clearVideoJobState();
-            showToast({
-              type: 'error',
-              title: 'Video failed',
-              message:
-                typeof job.artifacts === 'object' && job.artifacts
-                  ? JSON.stringify(job.artifacts).slice(0, 500)
-                  : 'Video job failed',
-            });
-          }
+          clearVideoJobState();
+          showToast({
+            type: 'error',
+            title: 'Video failed',
+            message:
+              typeof job.artifacts === 'object' && job.artifacts
+                ? JSON.stringify(job.artifacts).slice(0, 500)
+                : 'Video job failed',
+          });
         }
       } catch (err) {
         if (cancelled) return;
@@ -800,24 +887,108 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, shot.id, videoJobId, videoUrl]);
 
+  useEffect(() => {
+    if (!imageJobId) return;
+    if (imageUrl) return;
+    if (activeTab !== 'image') return;
+
+    let cancelled = false;
+    let interval: number | undefined;
+
+    const pollOnce = async () => {
+      try {
+        const job = await fetchJobStatus(imageJobId);
+        if (cancelled) return;
+        const status = (job.status || '').toLowerCase();
+        setImageJobStatusByShotId(prev => ({ ...prev, [shot.id]: status }));
+
+        if (status === 'completed' || status === 'success' || status === 'succeeded') {
+          const url = extractImageUrlFromJob(job);
+          if (url) {
+            setImageByShotId(prev => ({ ...prev, [shot.id]: url }));
+            clearImageJobState();
+            showToast({ type: 'success', title: 'Image ready', message: 'Image generated.' });
+            if (interval) window.clearInterval(interval);
+            interval = undefined;
+          } else {
+            console.warn('[ImagePoll] Job completed but URL missing. Continuing to poll...');
+          }
+        }
+
+        if (status === 'failed' || status === 'error') {
+          if (interval) window.clearInterval(interval);
+          interval = undefined;
+          clearImageJobState();
+          showToast({
+            type: 'error',
+            title: 'Image failed',
+            message:
+              typeof job.artifacts === 'object' && job.artifacts
+                ? JSON.stringify(job.artifacts).slice(0, 500)
+                : 'Image job failed',
+          });
+        }
+      } catch (err) {
+        if (cancelled) return;
+        showToast({
+          type: 'error',
+          title: 'Status check failed',
+          message: err instanceof Error ? err.message : 'Unknown error',
+        });
+      }
+    };
+
+    pollOnce();
+    interval = window.setInterval(pollOnce, 3000);
+
+    return () => {
+      cancelled = true;
+      if (interval) window.clearInterval(interval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, shot.id, imageJobId, imageUrl]);
+
   const renderEmptyState = () => (
     <div className="flex flex-col items-center justify-center h-full text-center">
       <div className="w-full aspect-video bg-comfy-input-bg rounded-lg flex items-center justify-center mb-4">
-        <span className="text-comfy-muted text-sm">No preview available</span>
+        <span className="text-comfy-muted text-sm">
+          {activeTab === 'image' && imageJobId
+            ? `Image job ${imageJobId.slice(0, 8)}… ${imageJobStatus || ''}`.trim()
+            : activeTab !== 'image' && videoJobId
+              ? `Video job ${videoJobId.slice(0, 8)}… ${videoJobStatus || ''}`.trim()
+              : `No ${activeTab === 'image' ? 'image' : 'video'} generated`}
+        </span>
       </div>
-      <button
-        onClick={handleGenerate}
-        disabled={isGenerating || !canGenerate}
-        className="comfy-btn disabled:opacity-50"
-      >
-        {isGenerating
-          ? activeTab === 'image'
-            ? 'Generating image...'
-            : 'Generating video...'
-          : activeTab === 'image'
-            ? 'Generate Image'
-            : 'Generate Video'}
-      </button>
+      <div className="flex items-center gap-2">
+        <button
+          onClick={handleGenerate}
+          disabled={isGenerating || !canGenerate || (activeTab === 'image' ? imageJobIsActive : videoJobIsActive)}
+          className="comfy-btn disabled:opacity-50"
+        >
+          {isGenerating
+            ? activeTab === 'image'
+              ? 'Generating image...'
+              : 'Generating video...'
+            : (activeTab === 'image' ? imageJobIsActive : videoJobIsActive)
+              ? 'Generating…'
+              : activeTab === 'image'
+                ? 'Generate Image'
+                : 'Generate Video'}
+        </button>
+        {activeTab === 'image' && imageJobId && !imageJobIsActive && (
+          <button
+            type="button"
+            onClick={() => {
+              clearImageJobState();
+              setImageByShotId(prev => ({ ...prev, [shot.id]: '' }));
+            }}
+            className="comfy-btn-secondary"
+            title="Clear the previous job and try again"
+          >
+            Reset
+          </button>
+        )}
+      </div>
     </div>
   );
 
@@ -846,43 +1017,48 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
     );
   };
 
-	  const renderVideoPreview = () => {
-	    if (!videoUrl) {
-	      return (
+  const renderVideoView = (title: string, onGenerate: () => void, isImageToVideo = false) => {
+    if (!videoUrl) {
+      return (
         <div className="flex flex-col items-center justify-center h-full text-center">
           <div className="w-full aspect-video bg-comfy-input-bg rounded-lg flex items-center justify-center mb-4">
             <span className="text-comfy-muted text-sm">
               {videoJobId
                 ? `Video job ${videoJobId.slice(0, 8)}… ${videoJobStatus || ''}`.trim()
-                : 'No video generated'}
+                : `No ${title.toLowerCase()} generated`}
             </span>
           </div>
-		          <div className="flex items-center gap-2">
-		            <button
-		              onClick={handleGenerate}
-		              disabled={isGenerating || !canGenerate || videoJobIsActive}
-		              className="comfy-btn disabled:opacity-50"
-		            >
-		              {videoJobIsActive ? 'Generating…' : isGenerating ? 'Generating video...' : 'Generate Video'}
-		            </button>
-		            {videoJobId && !videoJobIsActive && (
-		              <button
-		                type="button"
-		                onClick={() => {
-		                  clearVideoJobState();
-		                  setVideoByShotId(prev => ({ ...prev, [shot.id]: '' }));
-		                }}
-		                className="comfy-btn-secondary disabled:opacity-50"
-		                disabled={isGenerating}
-		                title="Clear the previous job and try again"
-		              >
-		                Reset
-		              </button>
-		            )}
-		          </div>
-		        </div>
-		      );
-		    }
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onGenerate}
+              disabled={isGenerating || !canGenerate || videoJobIsActive || (isImageToVideo && !imageUrl)}
+              className="comfy-btn disabled:opacity-50"
+            >
+              {videoJobIsActive ? 'Generating…' : isGenerating ? `Generating ${title.toLowerCase()}...` : `Generate ${title}`}
+            </button>
+            {videoJobId && !videoJobIsActive && (
+              <button
+                type="button"
+                onClick={() => {
+                  clearVideoJobState();
+                  setVideoByShotId(prev => ({ ...prev, [shot.id]: '' }));
+                }}
+                className="comfy-btn-secondary disabled:opacity-50"
+                disabled={isGenerating}
+                title="Clear the previous job and try again"
+              >
+                Reset
+              </button>
+            )}
+          </div>
+          {isImageToVideo && !imageUrl && (
+            <p className="mt-2 text-[11px] text-comfy-warning">
+              Generate an image in the "Image" tab first.
+            </p>
+          )}
+        </div>
+      );
+    }
 
     return (
       <div className="space-y-4">
@@ -890,8 +1066,8 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
           <video src={videoUrl} controls className="w-full h-full object-contain" />
         </div>
         <div className="flex gap-2">
-          <button onClick={handleRegenerate} disabled={isGenerating} className="comfy-btn flex-1">
-            {isGenerating ? 'Regenerating video...' : 'Regenerate Video'}
+          <button onClick={onGenerate} disabled={isGenerating} className="comfy-btn flex-1">
+            {isGenerating ? `Regenerating ${title.toLowerCase()}...` : `Regenerate ${title}`}
           </button>
           <a
             className="comfy-btn-secondary"
@@ -921,31 +1097,28 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
 	        >
 	          Image
 	        </button>
-			        <button
-			          type="button"
-			          onClick={async () => {
-			            setActiveTab('video');
-			            await handleImageToVideo();
-			          }}
-		          disabled={!imageUrl || isGenerating || !canGenerate || videoJobIsActive}
-		          className="comfy-segment-btn disabled:opacity-50"
-		          title={
-		            imageUrl
-		              ? 'Generate a video using the generated image as reference'
-		              : 'Generate an image first, then convert it to video'
-		          }
-		        >
-		          Image → Video
-		        </button>
-		        <button
-		          onClick={() => setActiveTab('video')}
-		            className={`comfy-segment-btn ${
-		              activeTab === 'video' ? 'comfy-segment-btn-active' : ''
-		            }`}
-		        >
-		          Video
-		        </button>
-		        </div>
+	        <button
+	          onClick={() => setActiveTab('image_to_video')}
+	            className={`comfy-segment-btn ${
+	              activeTab === 'image_to_video' ? 'comfy-segment-btn-active' : ''
+	            }`}
+	          title={
+	            imageUrl
+	              ? 'Generate a video using the generated image as reference'
+	              : 'Generate an image first, then convert it to video'
+	          }
+	        >
+	          Image → Video
+	        </button>
+	        <button
+	          onClick={() => setActiveTab('video')}
+	            className={`comfy-segment-btn ${
+	              activeTab === 'video' ? 'comfy-segment-btn-active' : ''
+	            }`}
+	        >
+	          Video
+	        </button>
+	        </div>
 		      </div>
 
       <details className="rounded-lg border border-comfy-border bg-comfy-input-bg p-3 mb-4">
@@ -960,6 +1133,8 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
               // Ensure Copilot has a deterministic focus target even if the user didn't explicitly click in the list.
               if (shot?.id && shot?.planId) {
                 selectShot(shot.id, shot.planId);
+                useCopilotActionsStore.getState().setPromptInput(`/improve-prompt Please improve the image generation prompt for shot ${shot.id.slice(0, 4)}.\n\nHere is the current assembled context:\n\n${assembledPrompt}`);
+                setRightPanelTab('copilot');
               } else {
                 showToast({
                   type: 'warning',
@@ -967,7 +1142,6 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
                   message: 'Select a shot in the list first, then improve its prompt.',
                 });
               }
-              setRightPanelTab('copilot');
             }}
             title="Open Copilot to improve this shot prompt"
           >
@@ -975,10 +1149,15 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
           </button>
         </div>
         <div className="mt-3 space-y-2">
-          <div className="flex items-center justify-between">
-            <div className="text-[11px] text-comfy-muted">
-              {shot.generatorPrompt ? 'Manual override saved' : 'Using assembled context prompt'}
+            <div className="flex items-center justify-between mb-2">
+              <label className="block text-[11px] font-bold uppercase tracking-wider text-comfy-muted">
+                Generator Context
+              </label>
+              <span className={`text-[10px] px-1.5 py-0.5 rounded ${shot.generator_prompt ? 'bg-amber-500/20 text-amber-500' : 'bg-blue-500/20 text-blue-500'}`}>
+                {shot.generator_prompt ? 'Manual override saved' : 'Using assembled context prompt'}
+              </span>
             </div>
+          <div className="flex items-center justify-between">
             {isPromptDirty && <div className="text-[11px] text-comfy-warning">Unsaved</div>}
           </div>
 
@@ -996,7 +1175,7 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
 
           <label className="block text-[11px] text-comfy-muted">NEGATIVE_PROMPT (optional)</label>
           <textarea
-            value={negativePromptDraft}
+            value={negative_prompt_draft}
             onChange={e => {
               setNegativePromptDraft(e.target.value);
               setIsPromptDirty(true);
@@ -1012,9 +1191,9 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
               className="comfy-btn-secondary text-xs disabled:opacity-50"
               disabled={isSavingPrompt}
               onClick={() => {
-                const base = (shot.generatorPrompt || '').trim() || generationPrompt;
+                const base = (shot.generator_prompt || '').trim() || generationPrompt;
                 setPromptDraft(base);
-                setNegativePromptDraft((shot.generatorNegativePrompt || '').trim());
+                setNegativePromptDraft((shot.generator_negative_prompt || '').trim());
                 setIsPromptDirty(false);
               }}
               title="Reset to the currently loaded prompt"
@@ -1050,7 +1229,9 @@ export function PreviewStack({ projectId, shot }: PreviewStackProps) {
 
       {/* Preview Content */}
       <div className="flex-1">
-        {activeTab === 'image' ? renderImagePreview() : renderVideoPreview()}
+        {activeTab === 'image' && renderImagePreview()}
+        {activeTab === 'image_to_video' && renderVideoView('Video', handleImageToVideo, true)}
+        {activeTab === 'video' && renderVideoView('Video', handleGenerate)}
       </div>
     </div>
   );

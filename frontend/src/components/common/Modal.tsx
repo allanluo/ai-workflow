@@ -7,7 +7,7 @@ interface ModalProps {
   title?: string;
   children: ReactNode;
   footer?: ReactNode;
-  size?: 'sm' | 'md' | 'lg' | 'xl';
+  size?: 'sm' | 'md' | 'lg' | 'xl' | '2xl' | 'full';
   closeOnOverlay?: boolean;
   closeOnEscape?: boolean;
 }
@@ -50,12 +50,14 @@ export function Modal({
     md: 'max-w-md',
     lg: 'max-w-lg',
     xl: 'max-w-xl',
+    '2xl': 'max-w-5xl w-full',
+    'full': 'max-w-[90vw] w-[90vw] h-[90vh]',
   };
 
   const modalContent = (
     <div className="modal-overlay" onClick={closeOnOverlay ? onClose : undefined}>
       <div
-        className={`modal ${sizeClasses[size]} animate-slideIn`}
+        className={`modal ${sizeClasses[size]} animate-slideIn flex flex-col`}
         style={{ margin: 'auto' }}
         onClick={e => e.stopPropagation()}
       >

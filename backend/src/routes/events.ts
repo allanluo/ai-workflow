@@ -1,6 +1,7 @@
 import { listProjectEvents, insertProjectEvent } from "@ai-workflow/database";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import { PassThrough } from "stream";
 
 const projectIdParamsSchema = z.object({ projectId: z.string() });
 
@@ -37,14 +38,16 @@ export async function registerEventRoutes(app: FastifyInstance) {
     return { ok: true, data: null, error: null };
   });
 
-  app.get("/projects/:projectId/events/stream", async (request, reply) => {
+  app.get("/projects/:projectId/events/stream", (request, reply) => {
     const params = projectIdParamsSchema.parse(request.params);
     const seenEventIds = new Set(listProjectEvents(params.projectId).map((event) => event.id));
 
-    reply.raw.setHeader("Content-Type", "text/event-stream");
-    reply.raw.setHeader("Cache-Control", "no-cache");
-    reply.raw.setHeader("Connection", "keep-alive");
-    reply.raw.flushHeaders();
+    reply.header("Content-Type", "text/event-stream");
+    reply.header("Cache-Control", "no-cache, no-transform");
+    reply.header("Connection", "keep-alive");
+    reply.header("X-Accel-Buffering", "no");
+
+    const stream = new PassThrough();
 
     const payload = JSON.stringify({
       event_type: "stream_connected",
@@ -53,8 +56,8 @@ export async function registerEventRoutes(app: FastifyInstance) {
       data: {}
     });
 
-    reply.raw.write(`event: ready\n`);
-    reply.raw.write(`data: ${payload}\n\n`);
+    stream.write(`event: ready\n`);
+    stream.write(`data: ${payload}\n\n`);
 
     const poll = setInterval(() => {
       const freshEvents = listProjectEvents(params.projectId)
@@ -63,23 +66,23 @@ export async function registerEventRoutes(app: FastifyInstance) {
 
       for (const event of freshEvents) {
         seenEventIds.add(event.id);
-        reply.raw.write(`event: project_event\n`);
-        reply.raw.write(`id: ${event.id}\n`);
-        reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+        stream.write(`event: project_event\n`);
+        stream.write(`id: ${event.id}\n`);
+        stream.write(`data: ${JSON.stringify(event)}\n\n`);
       }
     }, 1000);
 
     const heartbeat = setInterval(() => {
-      reply.raw.write(`event: heartbeat\n`);
-      reply.raw.write(`data: {"timestamp":"${new Date().toISOString()}"}\n\n`);
+      stream.write(`event: heartbeat\n`);
+      stream.write(`data: {"timestamp":"${new Date().toISOString()}"}\n\n`);
     }, 15000);
 
     request.raw.on("close", () => {
       clearInterval(poll);
       clearInterval(heartbeat);
-      reply.raw.end();
+      stream.end();
     });
 
-    return reply;
+    return reply.send(stream);
   });
 }

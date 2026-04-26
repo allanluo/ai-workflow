@@ -31,7 +31,8 @@ export function CopilotPanel() {
   const { draft } = useDraftStore();
   const activeNode = draft?.nodes.find(n => n.id === selectedNodeId);
 
-  const [input, setInput] = useState('');
+  const input = useCopilotActionsStore(s => s.promptInput);
+  const setInput = useCopilotActionsStore(s => s.setPromptInput);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const didMountRef = useRef(false);
 
@@ -172,46 +173,50 @@ export function CopilotPanel() {
       const top = path.split('/')[1] ?? '';
       if (!top) return `${opKind} ${path}`;
 
-      if (top === 'summary' || top === 'tone') return `Set ${top}: ${formatValue(value)}`;
-      if (top === 'themes') return `Set themes (${Array.isArray(value) ? value.length : 0}): ${formatValue(value)}`;
-      if (top === 'colorPalette') return `Set color palette (${Array.isArray(value) ? value.length : 0}): ${formatValue(value)}`;
-      if (top === 'worldRules') return `Set world rules: ${formatValue(value)}`;
-      if (top === 'continuity') return `Set continuity (${Array.isArray(value) ? value.length : 0})`;
-
+      if (top === 'summary' || top === 'tone' || top === 'action') return `Set ${top}: ${formatValue(value)}`;
+      if (top === 'narration') return `Update narration: ${formatValue(value)}`;
+      if (top === 'internal_monologue') return `Update monologue: ${formatValue(value)}`;
+      if (top === 'dialogue') return `Update dialogue: ${formatValue(value)}`;
+      if (top === 'frame_prompt') return `Update Image Prompt: ${formatValue(value)}`;
+      if (top === 'video_prompt') return `Update Video Prompt: ${formatValue(value)}`;
+      if (top === 'environment_lock') return `Update Environment Lock: ${formatValue(value)}`;
+      if (top === 'source_summary') return `Update Project Summary: ${formatValue(value)}`;
+      
       if (top === 'characters' && path === '/characters' && Array.isArray(value)) {
         const names = value
-          .map((c: any) => (typeof c?.name === 'string' ? c.name.trim() : ''))
+          .map((c: any) => (typeof c === 'string' ? c : typeof c?.name === 'string' ? c.name.trim() : ''))
           .filter(Boolean);
         const preview = names.slice(0, 6).join(', ');
-        return `Replace full character list (${names.length}): ${preview}${names.length > 6 ? ', …' : ''}`;
+        return `Replace characters (${names.length}): ${preview}${names.length > 6 ? ', …' : ''}`;
+      }
+
+      if (top === 'props' && Array.isArray(value)) {
+        const preview = value.slice(0, 6).join(', ');
+        return `Update Props (${value.length}): ${preview}${value.length > 6 ? ', …' : ''}`;
+      }
+
+      if (top === 'themes') return `Set themes (${Array.isArray(value) ? value.length : 0}): ${formatValue(value)}`;
+      if (top === 'color_palette' || top === 'colorPalette') return `Set color palette (${Array.isArray(value) ? value.length : 0}): ${formatValue(value)}`;
+      if (top === 'world_rules' || top === 'worldRules') return `Set world rules: ${formatValue(value)}`;
+      if (top === 'continuity') return `Set continuity (${Array.isArray(value) ? value.length : 0})`;
+
+      if (top === 'character_table' && Array.isArray(value)) {
+        return `Update Character Table (${value.length} entries)`;
       }
 
       if (top === 'characters') {
         const m = path.match(/^\/characters\/(\d+)\/appearance\/(face|hair|clothing|shoes|hat|accessories)$/);
         if (m) {
-          const idx = m[1];
+          const idx = parseInt(m[1], 10);
           const key = m[2];
-          return `Set character ${idx} ${key}: ${formatValue(value)}`;
+          const characterNames = (proposal?.metadata?.characterNames || []) as string[];
+          const name = characterNames[idx] || '';
+          const label = name ? `${name} ${key}` : `character ${idx} ${key}`;
+          return `Set ${label}: ${formatValue(value)}`;
         }
         if (/^\/characters\/\d+\/appearance$/.test(path)) {
           return `Update character appearance (${path})`;
         }
-      }
-
-      if (top === 'locations' && path === '/locations' && Array.isArray(value)) {
-        const names = value
-          .map((c: any) => (typeof c?.name === 'string' ? c.name.trim() : ''))
-          .filter(Boolean);
-        const preview = names.slice(0, 6).join(', ');
-        return `Replace full location list (${names.length}): ${preview}${names.length > 6 ? ', …' : ''}`;
-      }
-
-      if (top === 'equipment' && path === '/equipment' && Array.isArray(value)) {
-        const names = value
-          .map((c: any) => (typeof c?.name === 'string' ? c.name.trim() : ''))
-          .filter(Boolean);
-        const preview = names.slice(0, 6).join(', ');
-        return `Replace full equipment list (${names.length}): ${preview}${names.length > 6 ? ', …' : ''}`;
       }
 
       return `${opKind} ${path}${'value' in (op ?? {}) ? ` = ${formatValue(value)}` : ''}`;
@@ -245,7 +250,7 @@ export function CopilotPanel() {
       }
       if (chars.length > 5) lines.push(`- (… +${chars.length - 5} more)`);
       lines.push('');
-      lines.push('Tip: if you only want to change Allan, the proposal should update Allan only (not replace every character).');
+      lines.push('Tip: if you only want to change one specific character, the proposal should update that character only (not replace the entire list).');
     }
 
     lines.push('');
@@ -410,8 +415,10 @@ export function CopilotPanel() {
         }
 
         const prompt = typeof shotSuggestion.prompt === 'string' ? shotSuggestion.prompt.trim() : '';
-        const negativePrompt =
-          typeof shotSuggestion.negative_prompt === 'string' ? shotSuggestion.negative_prompt.trim() : '';
+        const negative_prompt =
+          typeof (shotSuggestion.negative_prompt ?? shotSuggestion.negativePrompt) === 'string'
+            ? String(shotSuggestion.negative_prompt ?? shotSuggestion.negativePrompt).trim()
+            : '';
         if (!prompt) {
           appendAssistantMessage('Applied, but no prompt was found to generate an image.');
           setInput('');
@@ -422,7 +429,7 @@ export function CopilotPanel() {
           projectId,
           shotId: selectedShotId,
           prompt,
-          negativePrompt: negativePrompt || undefined,
+          negative_prompt: negative_prompt || undefined,
           width: 1280,
           height: 720,
         });

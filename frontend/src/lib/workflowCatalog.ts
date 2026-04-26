@@ -98,8 +98,8 @@ export const workflowNodeCatalog: WorkflowCatalogNodeDefinition[] = [
   "summary": "2-3 sentence overview of the story",
   "themes": ["theme1"],
   "tone": "overall tone",
-  "colorPalette": ["dominant colors"],
-  "worldRules": ["rule"],
+  "color_palette": ["dominant colors"],
+  "world_rules": ["rule"],
   "characters": [{
     "name": "name",
     "role": "protagonist/antagonist/supporting",
@@ -119,7 +119,7 @@ export const workflowNodeCatalog: WorkflowCatalogNodeDefinition[] = [
     "owner": "character name"
   }]
 }`,
-      model: 'gemma3:1b',
+      model: 'gemma4:e2b',
     },
   },
   {
@@ -139,12 +139,12 @@ export const workflowNodeCatalog: WorkflowCatalogNodeDefinition[] = [
     {
       "title": "Scene title",
       "purpose": "Why this scene exists in the narrative",
-      "emotionalBeat": "The primary emotion or emotional shift",
+      "emotional_beat": "The primary emotion or emotional shift",
       "setting": "Detailed description of the location and time"
     }
   ]
 }`,
-      model: 'gemma3:1b',
+      model: 'gemma4:e2b',
     },
   },
   {
@@ -157,51 +157,64 @@ export const workflowNodeCatalog: WorkflowCatalogNodeDefinition[] = [
     inputSummary: 'scene_outline',
     outputSummary: 'shot_plan',
     defaultParams: {
-      prompt: `You are creating a shot plan for a story based on the provided SOURCE CONTENT (story, canon, and optionally a scene outline).
+      prompt: `You are creating a comprehensive shot plan for a production based on the provided SOURCE CONTENT (story, canon, and optionally a scene outline).
 
-Rules:
-- If SOURCE CONTENT contains a JSON object with a top-level key "scenes" (an array of scenes), then generate shots PER SCENE.
-  - For each scene, generate 4–10 shots that match that scene's title/purpose/emotionalBeat/setting.
-  - Keep shot numbering restart per scene (1..N) OR use global numbering, but be consistent.
-- If no scenes are provided, generate 12–30 shots that cover the story progression using story+canon context.
-- Keep descriptions concrete and filmable. Avoid vague repetition.
-- Output ONLY valid JSON (no markdown, no explanation, no text before or after).
+Rules (STRICT):
+- You MUST maintain 100% visual consistency with the provided CHARACTER_TABLE and ENVIRONMENT_LOCK.
+- Do NOT invent new characters. Only use the characters defined in the provided production requirements.
+- Focus on narrative consistency, visual detail, and production feasibility.
+- OUTPUT ONLY VALID JSON. No markdown, no conversational filler, no text before or after the JSON block.
 
-The JSON MUST conform to one of these schemas:
-
-Schema A (preferred when scenes exist):
+The JSON MUST conform to the following schema. It MUST contain a "scenes" array, where each scene includes its own "shots" array:
 {
+  "title": "Project Title",
+  "source_summary": "A brief summary of the narrative/goal",
+  "environment_lock": "COPY EXACTLY from the provided ### PRODUCTION_REQUIREMENTS ### if available, otherwise describe a unified visual environment.",
+  "character_table": [
+    {
+      "name": "COPY NAME EXACTLY from Canon",
+      "role": "...",
+      "gender": "...",
+      "age": "...",
+      "character_image": "COPY KEYWORDS EXACTLY from Canon",
+      "appearance": {
+        "face": "...",
+        "hair": "...",
+        "clothing": "...",
+        "shoes": "...",
+        "hat": "...",
+        "accessories": "..."
+      }
+    }
+  ],
   "scenes": [
     {
-      "title": "Scene title",
+      "scene": 1,
+      "description": "Brief summary of the scene's emotional beat or goal",
       "shots": [
         {
-          "shotNumber": "1",
-          "description": "Brief description of the shot",
-          "framing": "e.g., Wide, Medium, Close-up",
-          "angle": "e.g., Eye-level, High, Low",
-          "motion": "e.g., Pan, Tilt, Dolly, Static",
-          "continuityNotes": "Notes for seamless transitions"
+          "shot_number": 1,
+          "action": "Visual description of the specific action and subject",
+          "framing": "Wide",
+          "angle": "Eye Level",
+          "motion": "Static",
+          "narration": "Voiceover script if applicable",
+          "characters": ["Name of character(s) present, must match character_table names"],
+          "environment": "Setting details specific to this shot",
+          "props": ["Key items present"],
+          "frame_prompt": "A detailed cinematic descriptive prompt for still image generation (MUST include the exact clothing, hair, and facial features of the characters, plus lighting and style)",
+          "video_prompt": "A detailed description of the motion and temporal activity for video generation"
         }
       ]
     }
   ]
 }
-
-Schema B (when scenes are not available):
-{
-  "shots": [
-    {
-      "shotNumber": "1",
-      "description": "Brief description of the shot",
-      "framing": "e.g., Wide, Medium, Close-up",
-      "angle": "e.g., Eye-level, High, Low",
-      "motion": "e.g., Pan, Tilt, Dolly, Static",
-      "continuityNotes": "Notes for seamless transitions"
-    }
-  ]
-}`,
-      model: 'gemma3:1b',
+IMPORTANT: Each scene MUST have multiple shots in its "shots" array. Do NOT output a top-level "shots" array.
+ALLOWED VALUES:
+- framing: Wide, Medium, Close-up, Extreme Close-up, Over the Shoulder, POV
+- angle: Eye Level, High, Low, Dutch, Bird's Eye, Worm's Eye
+- motion: Static, Pan, Tilt, Tracking, Dolly, Zoom, Handheld`,
+      model: 'gemma4:e2b',
     },
   },
   {
@@ -271,7 +284,7 @@ Schema B (when scenes are not available):
     defaultParams: {
       prompt:
         'Review the current plan for continuity issues, duplicate beats, missing transitions, or style inconsistency.',
-      model: 'gemma3:1b',
+      model: 'gemma4:e2b',
     },
   },
   {
@@ -451,7 +464,7 @@ export function createWorkflowNodeFromCatalog(
 
   return {
     id: overrides?.id ?? `${nodeKey}-${Math.random().toString(36).slice(2, 7)}`,
-    type: nodeKey,
+    type: definition.runtimeType,
     params: {
       ...definition.defaultParams,
       ...(overrides?.params ?? {}),

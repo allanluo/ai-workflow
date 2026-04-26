@@ -1,4 +1,4 @@
-export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8787/api/v1';
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8787/api/v1';
 
 export interface Project {
   id: string;
@@ -793,6 +793,7 @@ export interface JobStatus {
 export async function generateCharacterImage(input: {
   projectId: string;
   prompt: string;
+  negativePrompt?: string;
   width?: number;
   height?: number;
 }): Promise<ImageGenerationResult> {
@@ -805,6 +806,7 @@ export async function generateCharacterImage(input: {
       },
       body: JSON.stringify({
         prompt: input.prompt,
+        negative_prompt: input.negativePrompt,
         width: input.width ?? 1024,
         height: input.height ?? 1024,
       }),
@@ -1164,6 +1166,23 @@ export async function createWorkflowVersion(input: { workflowId: string; notes: 
   return payload.data.workflow_version;
 }
 
+export async function approveWorkflowVersion(versionId: string) {
+  const response = await fetch(`${API_BASE_URL}/workflow-versions/${versionId}/approve`, {
+    method: 'POST',
+  });
+
+  if (!response.ok) {
+    throw new Error(`Approve workflow version failed with ${response.status}`);
+  }
+
+  const payload = (await response.json()) as {
+    ok: boolean;
+    data: { workflow_version: WorkflowVersion };
+  };
+
+  return payload.data.workflow_version;
+}
+
 export async function fetchProjectWorkflowRuns(
   projectId: string,
   workflowVersionId?: string
@@ -1222,6 +1241,36 @@ export async function createWorkflowRun(input: {
 
   if (!response.ok) {
     throw new Error(`Create workflow run failed with ${response.status}`);
+  }
+
+  const payload = (await response.json()) as {
+    ok: boolean;
+    data: { workflow_run: WorkflowRun };
+  };
+
+  return payload.data.workflow_run;
+}
+
+export async function createWorkflowRunDirect(input: {
+  workflowId: string;
+  trigger_source?: string;
+}) {
+  const response = await fetch(
+    `${API_BASE_URL}/workflows/${input.workflowId}/runs`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        trigger_source: input.trigger_source ?? 'manual',
+        rerun_of_workflow_run_id: null,
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(`Create workflow run direct failed with ${response.status}`);
   }
 
   const payload = (await response.json()) as {

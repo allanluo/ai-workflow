@@ -16,6 +16,7 @@ import { embedTextTool } from './read/embedText';
 import { semanticSearchTool } from './read/semanticSearch';
 import { proposeAddSceneTool } from './read/proposeAddScene';
 import { proposeCreateWorkflowTool } from './read/proposeCreateWorkflow';
+import { proposePatchStoryInputTool } from './read/proposePatchStoryInput';
 import { proposeDeleteWorkflowTool } from './read/proposeDeleteWorkflow';
 import { proposeDeprecateAssetTool } from './read/proposeDeprecateAsset';
 import { pickWorkflowByNodeTypeTool } from './read/pickWorkflowByNodeType';
@@ -59,6 +60,7 @@ export function registerBuiltinTools() {
   registerTool(embedTextTool);
   registerTool(semanticSearchTool);
   registerTool(proposeCreateWorkflowTool);
+  registerTool(proposePatchStoryInputTool);
   registerTool(proposeAddSceneTool);
   registerTool(proposeDeleteWorkflowTool);
   registerTool(proposeDeprecateAssetTool);

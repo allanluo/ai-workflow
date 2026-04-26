@@ -1,5 +1,6 @@
 import type { ParsedIntent } from './types';
 import { createWorkflowSkill } from './skills/createWorkflow';
+import { updateWorkflowStoryInputSkill } from './skills/updateWorkflowStoryInput';
 import { addSceneSkill } from './skills/addScene';
 import { improveShotPromptSkill } from './skills/improveShotPrompt';
 import { generateCanonSkill } from './skills/generateCanon';
@@ -7,10 +8,13 @@ import { updateCanonSkill } from './skills/updateCanon';
 import { generateScenesSkill } from './skills/generateScenes';
 import { generateShotPlansSkill } from './skills/generateShotPlans';
 import { generateShotsSkill } from './skills/generateShots';
+import { updateSceneSkill } from './skills/updateScene';
+import { updateShotSkill } from './skills/updateShot';
 import type { SkillContext } from './types';
 
 export type SkillName =
   | 'createWorkflow'
+  | 'updateWorkflowStoryInput'
   | 'addScene'
   | 'improveShotPrompt'
   | 'generateCanon'
@@ -19,6 +23,8 @@ export type SkillName =
   | 'generateShotPlans'
   | 'explainNode'
   | 'generateShots'
+  | 'updateScene'
+  | 'updateShot'
   | 'chat';
 
 interface IntentPattern {
@@ -27,6 +33,20 @@ interface IntentPattern {
 }
 
 const intentPatterns: IntentPattern[] = [
+  {
+    skillName: 'updateWorkflowStoryInput',
+    patterns: [
+      /update\s+(the\s+)?story\s+input/i,
+      /story\s+input\s+node/i,
+      /set\s+(the\s+)?story\s*(input|text)/i,
+      /fill\s+(the\s+)?story\s+input/i,
+      /put\s+.{0,120}(lyrics|text).{0,40}(in|into).{0,40}(story|workflow)/i,
+      /(paste|add)\s+.{0,80}(lyrics|text).{0,60}(story\s+input|input\s+node)/i,
+      /workflow.*story\s*input/i,
+      /story\s+input.*(lyrics|text|update|set|put)/i,
+      /(work\s+on|edit|change)\s+(the\s+)?story\s+input/i,
+    ],
+  },
   {
     skillName: 'createWorkflow',
     patterns: [
@@ -83,6 +103,31 @@ const intentPatterns: IntentPattern[] = [
     ],
   },
   {
+    skillName: 'updateScene',
+    patterns: [
+      /update\s+(the\s+)?scene/i,
+      /edit\s+(the\s+)?scene/i,
+      /change\s+(the\s+)?scene/i,
+      /modify\s+(the\s+)?scene/i,
+      /scene\s+update/i,
+      /scene\s+edit/i,
+    ],
+  },
+  {
+    skillName: 'updateShot',
+    patterns: [
+      /update\s+(the\s+)?shot/i,
+      /edit\s+(the\s+)?shot/i,
+      /change\s+(the\s+)?shot/i,
+      /modify\s+(the\s+)?shot/i,
+      /shot\s+update/i,
+      /shot\s+edit/i,
+      /change\s+(the\s+)?framing/i,
+      /change\s+(the\s+)?angle/i,
+      /change\s+(the\s+)?motion/i,
+    ],
+  },
+  {
     skillName: 'explainNode',
     patterns: [
       /explain\s+(this\s+)?node/i,
@@ -93,8 +138,8 @@ const intentPatterns: IntentPattern[] = [
   {
     skillName: 'improveShotPrompt',
     patterns: [
-      /improve\s+(this\s+)?(shot\s+)?prompt/i,
-      /fix\s+(this\s+)?(shot\s+)?(image\s+)?prompt/i,
+      /improve\s+(this\s+)?(shot\s+)?(image\s+)?(generation\s+)?prompt/i,
+      /fix\s+(this\s+)?(shot\s+)?(image\s+)?(generation\s+)?prompt/i,
       /make\s+(this\s+)?shot\s+more\s+cinematic/i,
       /shot\s+prompt\s+improvement/i,
       /wrong\s+(image|prompt)/i,
@@ -106,6 +151,7 @@ const intentPatterns: IntentPattern[] = [
 
 const skills = {
   createWorkflow: createWorkflowSkill,
+  updateWorkflowStoryInput: updateWorkflowStoryInputSkill,
   addScene: addSceneSkill,
   improveShotPrompt: improveShotPromptSkill,
   generateCanon: generateCanonSkill,
@@ -113,6 +159,8 @@ const skills = {
   generateScenes: generateScenesSkill,
   generateShotPlans: generateShotPlansSkill,
   generateShots: generateShotsSkill,
+  updateScene: updateSceneSkill,
+  updateShot: updateShotSkill,
 };
 
 function parseSlashIntent(userInput: string): ParsedIntent | null {
@@ -161,8 +209,20 @@ function parseSlashIntent(userInput: string): ParsedIntent | null {
   if (is('create-workflow', 'workflow', 'new-workflow')) {
     return { skillName: 'createWorkflow', confidence: 1.0, parameters: { args: rest } };
   }
+  if (is('update-story-input', 'story-input', 'set-story-input')) {
+    return { skillName: 'updateWorkflowStoryInput', confidence: 1.0, parameters: { args: rest } };
+  }
   if (is('add-scene', 'scene', 'new-scene')) {
     return { skillName: 'addScene', confidence: 1.0, parameters: { args: rest } };
+  }
+  if (is('update-scene', 'edit-scene', 'scene-update')) {
+    return { skillName: 'updateScene', confidence: 1.0, parameters: { args: rest } };
+  }
+  if (is('update-shot', 'edit-shot', 'shot-update')) {
+    return { skillName: 'updateShot', confidence: 1.0, parameters: { args: rest } };
+  }
+  if (is('improve-prompt', 'improve-shot-prompt', 'improveprompt')) {
+    return { skillName: 'improveShotPrompt', confidence: 1.0, parameters: { args: rest } };
   }
 
   return null;
@@ -218,6 +278,8 @@ export function getSkillExamples(skillName: SkillName): string[] {
   switch (skillName) {
     case 'createWorkflow':
       return createWorkflowSkill.examples;
+    case 'updateWorkflowStoryInput':
+      return updateWorkflowStoryInputSkill.examples;
     case 'addScene':
       return addSceneSkill.examples;
     default:

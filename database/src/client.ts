@@ -6,7 +6,12 @@ import { drizzle } from "drizzle-orm/better-sqlite3";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const packageRoot = path.resolve(__dirname, "../..");
+
+// Find the database package root by walking up until we find package.json
+let packageRoot = __dirname;
+while (packageRoot !== '/' && !fs.existsSync(path.join(packageRoot, "package.json"))) {
+  packageRoot = path.resolve(packageRoot, "..");
+}
 
 const isTest = process.env.NODE_ENV === "test" || process.env.VITEST === "true";
 

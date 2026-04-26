@@ -1,5 +1,5 @@
 import { parseIntent, executeSkill } from './intentParser';
-import type { SkillContext, SkillName, SkillResult } from './types';
+import type { ParsedIntent, SkillContext, SkillName, SkillResult } from './types';
 import { extractFirstJsonObjectLenient, llmGenerateText } from './llmClient';
 import { buildDeterministicCopilotContext, formatCopilotContext } from './context';
 import type { CopilotMessage } from './context';
@@ -16,6 +16,7 @@ export type CopilotTurnContext = SkillContext & {
 export type CopilotTurnOutput = {
   assistantMessages: string[];
   skillResult?: SkillResult | null;
+  shouldWipeContext?: boolean;
   ui?: {
     intentConfirm?: {
       // The original user request that needs disambiguation (next user reply is treated as confirmation).
@@ -55,26 +56,39 @@ function heuristicIntentGate(userText: string): IntentGate | null {
   const lower = t.toLowerCase();
 
   const has = (re: RegExp) => re.test(lower);
+  const writeVerbs = has(/\b(update|edit|change|modify|set|replace|apply|save|delete|remove|add|create|generate|redo|fix)\b/);
+
   const looksLikeCanonFieldEdit =
-    has(/\b(allan)\b/) ||
-    has(/\bappearance\b/) ||
-    has(/\b(face|hair|clothing|shoes|hat|accessories)\s*:/);
+    (has(/\bappearance\b/) ||
+      has(/\b(face|hair|clothing|shoes|hat|accessories)\s*:/) ||
+      (has(/\b(update|edit|change|set|fix)\b/) &&
+        has(/\b(face|hair|clothing|appearance)\b/) &&
+        has(/\ballan\b/))) &&
+    !has(/\b(1\+1|math|recipe|weather)\b/); // Explicitly exclude some non-canon noise
+
+  const looksLikeSceneFieldEdit =
+    has(/\bscene\b/) && (has(/\b(setting|emotional|purpose|title|shot\s*list)\b/) || writeVerbs);
+
+  const looksLikeShotFieldEdit =
+    (has(/\bshot\b/) || has(/\bcamera\b/)) &&
+    (has(/\b(angle|framing|motion|action|description|negative|production)\b/) || writeVerbs);
+    
   const target: IntentGate['target'] =
-    has(/\bcanon\b/) || looksLikeCanonFieldEdit ? 'canon'
+    (has(/\bcanon\b/) || looksLikeCanonFieldEdit) ? 'canon'
     : has(/\b(scene|scenes)\b/) ? 'scene'
     : has(/\b(shot\s*plan|shotplan|shot|shots)\b/) ? 'shot_plan'
     : has(/\bworkflow\b/) ? 'workflow'
     : has(/\boutput\b/) ? 'output'
     : has(/\b(run|rerun)\b/) ? 'run'
-    : 'unknown';
+    : 'none';
 
   const wantsSteps = has(/\b(plan|steps|step-by-step|roadmap|phases)\b/);
-  const asksHow = has(/^(how|why|what|where|when|can you explain|explain)\b/);
-  const writeVerbs = has(/\b(update|edit|change|modify|set|replace|apply|save|delete|remove|add|create|generate|redo|fix)\b/);
+  const looksLikeQuestion = has(/\b(how|why|what|where|when|can you explain|explain|suggest|recommend|brainstorm|ideas|thoughts|advice)\b/) || lower.endsWith('?');
+  
   const writeIntent =
-    has(/\b(update|edit|change|modify|set|replace|apply|save|delete|remove|add)\b/) ||
-    (target !== 'unknown' && writeVerbs) ||
-    (target === 'canon' && has(/\bunspecified\b/));
+    (has(/\b(update|edit|change|modify|set|replace|apply|save|delete|remove|add)\b/) ||
+    (target !== 'none' && writeVerbs) ||
+    (target === 'canon' && has(/\bunspecified\b/))) && !looksLikeQuestion;
 
   let mode: IntentGate['mode'] = 'discussion';
   let confidence = 0.0;
@@ -82,12 +96,12 @@ function heuristicIntentGate(userText: string): IntentGate | null {
   if (wantsSteps) {
     mode = 'plan';
     confidence = 0.86;
-  } else if (writeVerbs) {
-    mode = writeIntent ? 'action' : 'discussion';
+  } else if (writeVerbs && writeIntent) {
+    mode = 'action';
     confidence = 0.83;
-  } else if (asksHow) {
+  } else if (looksLikeQuestion) {
     mode = 'discussion';
-    confidence = 0.78;
+    confidence = 0.82;
   }
 
   if (confidence < 0.75) return null;
@@ -120,7 +134,7 @@ function buildIntentGatePrompt(input: { context: string; userText: string }) {
     '}',
     '',
     'Decision guidelines:',
-    '- discussion: user wants suggestions, explanations, brainstorming, or Q&A. No project changes.',
+    '- discussion: user wants suggestions, explanations, brainstorming, creative ideas, or Q&A. No project changes.',
     '- plan: user wants a multi-step procedure or workflow run (but not immediate writes).',
     '- action: user wants you to actually change something or produce a proposal/patch.',
     '- write_intent=true only when the user clearly wants to update assets/workflows/settings (or says "update/edit/change/save").',
@@ -138,24 +152,30 @@ function buildIntentGatePrompt(input: { context: string; userText: string }) {
   ].join('\n');
 }
 
-async function classifyIntent(input: { context: string; userText: string }): Promise<IntentGate | null> {
+async function classifyIntent(input: {
+  context: string;
+  userText: string;
+}): Promise<IntentGate | null> {
   const heuristic = heuristicIntentGate(input.userText);
-  if (heuristic) return heuristic;
+  // Only use heuristic if it's a high-confidence match for discussion.
+  if (heuristic && heuristic.mode === 'discussion' && heuristic.confidence > 0.7) return heuristic;
+
   const model =
     (import.meta.env.VITE_COPILOT_INTENT_MODEL as string | undefined) ||
     (import.meta.env.VITE_COPILOT_MODEL as string | undefined) ||
-    'gemma3:1b';
+    'gemma4:e2b';
   const prompt = buildIntentGatePrompt(input);
-  const raw = await llmGenerateText({ model, prompt, stream: false });
-  let parsed: unknown;
+
   try {
-    parsed = extractFirstJsonObjectLenient(raw);
-  } catch {
-    return null;
+    const raw = await llmGenerateText({ model, prompt, stream: false });
+    const parsed = extractFirstJsonObjectLenient(raw);
+    const validated = IntentGateSchema.safeParse(parsed);
+    if (!validated.success) return heuristic;
+    return validated.data;
+  } catch (err) {
+    console.warn('[Copilot] Intent classification failed, using heuristic fallback:', err);
+    return heuristic;
   }
-  const validated = IntentGateSchema.safeParse(parsed);
-  if (!validated.success) return null;
-  return validated.data;
 }
 
 function splitIntentConfirmation(userText: string): { base: string; confirmation: string | null } {
@@ -201,7 +221,15 @@ function looksLikeCanonUpdate(text: string) {
   if (t.includes('workflow')) return false;
   if (/\b(generate|extract)\b.*\bcanon\b/.test(t)) return false;
   if (/\bshot\b|\bscene\b/.test(t)) return false;
-  if (/\b(update|edit|change|modify)\b.*\bcanon\b/.test(t)) return true;
+  // Strong signals: specific canon fields + user wants them filled in.
+  if (/\bunspecified\b/.test(t) && /\b(face|hair|appearance|clothing|shoes|hat|accessories)\b/.test(t)) return true;
+  if (
+    /\b(update|edit|change|modify|set|fix|specify|provide|suggest|fill)\b/.test(t) &&
+    /\b(canon|character|allan|face|hair|appearance|clothing|shoes|hat|accessories|equipment|personality|environment_lock|environment lock|world\s+rules?)\b/.test(t)
+  )
+    return true;
+  // If the user directly asks about face/hair/appearance and mentions Allan/character, treat it as a canon edit discussion.
+  if (/\b(allan|character)\b/.test(t) && /\b(face|hair|appearance|clothing|shoes|hat|accessories)\b/.test(t)) return true;
   // When the canon doc is focused, users often just state facts/constraints.
   if (/\b(should\s+be|is\s+now|must\s+be|age|years\s+old|university\s+student)\b/.test(t)) return true;
   if (/\b(appearance|equipment|locations?|tone|themes?|world\s+rules?)\b/.test(t)) return true;
@@ -211,37 +239,46 @@ function looksLikeCanonUpdate(text: string) {
 function looksLikeChatOnlyQuestion(text: string) {
   const t = (text || '').toLowerCase().trim();
   if (!t) return false;
+  // Math and simple expressions
+  if (/^[0-9+\-*\/.\s()=]+$/.test(t) || /^what is [0-9+\-*\/.\s()=?]+$/i.test(t)) return true;
   // Planner-worthy actions
-  if (/\b(create|add|delete|remove|run|execute|generate|extract|reindex|index-status)\b/.test(t)) return false;
-  // Canon updates should remain proposal-first when explicitly requested.
-  if (/\b(update|edit|change|modify)\b.*\bcanon\b/.test(t)) return false;
+  if (/\b(create|add|delete|remove|run|execute|generate|extract|reindex|index-status|apply|review)\b/.test(t)) return false;
   // Suggestion/advice questions should be answered directly.
-  if (/\b(suggest|recommend|what\s+should|how\s+should|why|explain)\b/.test(t)) return true;
+  if (/\b(suggest|recommend|what\s+should|how\s+should|why|explain|is it possible|can you)\b/.test(t)) return true;
   if (t.endsWith('?')) return true;
   return false;
 }
 
 async function chatFallback(context: SkillContext, userText: string): Promise<string> {
+  const isSimple = looksLikeChatOnlyQuestion(userText);
   const ctx = await buildDeterministicCopilotContext({
     skillContext: context,
-    selection: {
+    selection: isSimple ? {
+      workflowId: undefined,
+      assetId: undefined,
+      nodeId: undefined,
+      shotPlanAssetId: undefined,
+      shotId: undefined,
+    } : {
       workflowId: context.workflowId,
       assetId: context.assetId,
       nodeId: context.selectedNode?.id,
       shotPlanAssetId: context.shotPlanAssetId,
       shotId: context.shotId,
     },
-    query: userText,
+    query: isSimple ? undefined : userText,
   });
-  const contextStr = formatCopilotContext(ctx);
+  const contextStr = isSimple ? '' : formatCopilotContext(ctx);
 
-  const systemPrompt =
-    'You are an AI Copilot assisting the user with their AI video and story workflow. Provide brief, helpful answers in plain text (no markdown like ** or *). Do not start with filler like "Okay, I understand"—start directly. When the user asks you to create workflows, suggest using the action buttons.';
+  const systemPrompt = isSimple
+    ? 'You are a helpful assistant. Answer the user\'s question directly and briefly. Do NOT provide any background info about characters, story consistency, or workflows. If it\'s math, give ONLY the result.'
+    : 'You are an AI Copilot. Provide brief, helpful answers in plain text. Do not start with filler. Only discuss character consistency or story details if directly relevant to the user\'s question.';
+  
   let finalPrompt = systemPrompt + '\n\n';
   if (contextStr) finalPrompt += `Current User Context:\n${contextStr}\n\n`;
   finalPrompt += `User: ${userText}\nAssistant:`;
 
-  const model = (import.meta.env.VITE_COPILOT_MODEL as string | undefined) || 'gemma3:1b';
+  const model = (import.meta.env.VITE_COPILOT_MODEL as string | undefined) || 'gemma4:e2b';
   return await llmGenerateText({ model, prompt: finalPrompt, stream: false });
 }
 
@@ -368,11 +405,46 @@ function stripApplyProposalUnlessExplicit(plan: ExecutionPlan, userText: string)
   return { ...plan, steps: nextSteps, requires_confirmation: false };
 }
 
+/**
+ * When a workflow is already open, long pasted lyrics or "music video" phrasing can
+ * re-match createWorkflow. Prefer updating the story input node instead.
+ */
+function coerceCreateWorkflowIntentForOpenWorkflow(
+  context: CopilotTurnContext,
+  userText: string,
+  parsed: ParsedIntent | null
+): ParsedIntent | null {
+  if ((userText || '').trim().startsWith('/')) return parsed;
+  if (!context.workflowId || !parsed || parsed.skillName !== 'createWorkflow') {
+    return parsed;
+  }
+  const t = userText.toLowerCase();
+
+  // If the user is explicitly asking for suggestions/how/what, do NOT coerce to updateWorkflowStoryInput.
+  if (/\b(suggest|recommend|how|what|explain|brainstorm|ideas)\b/.test(t)) {
+    return parsed;
+  }
+
+  const explicitNewWorkflow = /\b(create|make|build)\s+(a\s+)?(new\s+)?workflow\b/i.test(t);
+  const looksLikeStoryOrLyricsBody =
+    t.length > 400 ||
+    /\n\s*\n/.test(t) ||
+    /(verse|chorus|bridge|pre-chorus|🎶|🌅|🌴|🌊|🌺|🌌)/i.test(t) ||
+    /\bstory\s*input\b/i.test(t) ||
+    /\binput\s*node\b/i.test(t);
+
+  if (!explicitNewWorkflow && looksLikeStoryOrLyricsBody) {
+    return { skillName: 'updateWorkflowStoryInput', confidence: 0.92 };
+  }
+  return parsed;
+}
+
 export async function runCopilotTurn(
   context: CopilotTurnContext,
   userText: string,
   options?: { conversation?: CopilotMessage[] }
 ): Promise<CopilotTurnOutput> {
+  const isSimple = looksLikeChatOnlyQuestion(userText);
   const assistantMessages: string[] = [];
   const conversation = options?.conversation ?? [];
   appendAuditEvent(context.projectId, { type: 'user_message', summary: userText });
@@ -404,6 +476,7 @@ export async function runCopilotTurn(
           '- /generate-scenes',
           '- /generate-shots',
           '- /create-workflow <optional description>',
+          '- /update-story-input <optional text — paste lyrics after the command>',
           '- /add-scene <optional description>',
           '- /clear (or /quit)',
         ].join('\n')
@@ -503,35 +576,24 @@ export async function runCopilotTurn(
   const hasShotFocus = Boolean(context.projectId && context.shotId);
   const canUseShotPromptCopilot = Boolean(hasShotFocus && context.shotPlanAssetId);
 
-  const parsedIntent = parseIntent(userText);
-  const shouldRunShotPrompt =
-    canUseShotPromptCopilot &&
-    (parsedIntent?.skillName === 'improveShotPrompt' || (!parsedIntent && looksLikeShotPromptFeedback(userText)));
-
-  if (shouldRunShotPrompt) {
-    const { skillResult } = await executeSkill('improveShotPrompt', context, userText);
-    const result = skillResult as SkillResult | null;
-    const ui = extractShotPromptUi(result);
-    assistantMessages.push(result?.message || 'Done!');
-    if (ui?.shotPrompt) assistantMessages.push(formatShotPromptSuggestionForChat(ui.shotPrompt));
-    if (result?.proposal) {
-      appendAuditEvent(context.projectId, { type: 'proposal_created', summary: result.proposal.summary });
-    }
-    for (const msg of assistantMessages) appendAuditEvent(context.projectId, { type: 'assistant_message', summary: msg });
-    return { assistantMessages, skillResult: result, ui };
-  }
+  const parsedIntent = coerceCreateWorkflowIntentForOpenWorkflow(context, userText, parseIntent(userText));
+  // Skills are now handled primarily after the semantic intent gate (lines 625+).
+  // This removes fragile regex-based "fast tracks" that previously bypassed the gate.
 
   // Explicit slash commands should run deterministically (no semantic gating).
   if (parsedIntent && trimmed.startsWith('/')) {
-    const directProposalSkills = new Set(['createWorkflow', 'addScene']);
+    const directProposalSkills = new Set(['createWorkflow', 'updateWorkflowStoryInput', 'addScene', 'updateScene', 'updateShot', 'improveShotPrompt']);
     const directPlanSkills = new Set(['generateCanon', 'updateCanon', 'generateScenes', 'generateShotPlans', 'generateShots']);
     if (directProposalSkills.has(parsedIntent.skillName) || directPlanSkills.has(parsedIntent.skillName)) {
       const effectiveInput =
         parsedIntent.skillName === 'updateCanon' ? attachDiscussionContext(userText, conversation) : userText;
       const { skillResult } = await executeSkill(parsedIntent.skillName as SkillName, context, effectiveInput);
       const result = skillResult as SkillResult | null;
-      const ui = parsedIntent.skillName === 'updateCanon' ? extractCanonDraftUi(result) : undefined;
+      let ui: CopilotTurnOutput['ui'] = undefined;
+      if (parsedIntent.skillName === 'updateCanon') ui = extractCanonDraftUi(result);
+      if (parsedIntent.skillName === 'improveShotPrompt') ui = extractShotPromptUi(result);
       assistantMessages.push(result?.message || 'Ready.');
+      if (ui?.shotPrompt) assistantMessages.push(formatShotPromptSuggestionForChat(ui.shotPrompt));
       if (result?.proposal) appendAuditEvent(context.projectId, { type: 'proposal_created', summary: result.proposal.summary });
       for (const msg of assistantMessages) appendAuditEvent(context.projectId, { type: 'assistant_message', summary: msg });
       if (result?.plan) {
@@ -559,9 +621,23 @@ export async function runCopilotTurn(
   });
   const contextBlock = formatCopilotContext(ctx);
 
+  // Fast-track heuristics for common data-entry tasks BEFORE calling the slow LLM classifier.
+  if (!trimmed.startsWith('/')) {
+    if (looksLikeCanonUpdate(userText)) {
+      appendAuditEvent(context.projectId, { type: 'assistant_message', summary: 'Heuristic: Canon Field Edit detected' });
+      const { skillResult: result } = await executeSkill('updateCanon', context, userText);
+      const res = result as SkillResult | null;
+      assistantMessages.push(res?.message || 'Ready.');
+      if (res?.proposal) appendAuditEvent(context.projectId, { type: 'proposal_created', summary: res.proposal.summary });
+      for (const msg of assistantMessages) appendAuditEvent(context.projectId, { type: 'assistant_message', summary: msg });
+      return { assistantMessages, skillResult: res, ui: extractCanonDraftUi(res) };
+    }
+  }
+
   // Semantic intent gate: decide discussion vs plan vs action, and whether a write is intended.
   const { base: baseUserText, confirmation } = splitIntentConfirmation(userText);
   const gate = await classifyIntent({ context: contextBlock, userText });
+
   if (gate && (!gate.confidence || gate.confidence < 0.7) && !confirmation) {
     const purposeLine = gate.purpose ? `Goal I inferred: ${gate.purpose}\n\n` : '';
     const question =
@@ -574,28 +650,92 @@ export async function runCopilotTurn(
     return { assistantMessages, skillResult: null, ui: { intentConfirm: { request: baseUserText } } };
   }
 
+  // Fast-track heuristics for common data-entry tasks to avoid Planner overhead/hallucination.
+  if (gate?.mode === 'action' && gate?.write_intent && !trimmed.startsWith('/')) {
+    const has = (re: RegExp) => re.test(userText.toLowerCase());
+    const looksLikeSceneEdit = has(/\bscene\b/) && (has(/\b(setting|emotional|purpose|title|shot\s*list)\b/) || has(/\b(update|edit|change|modify|set|replace)\b/));
+    const looksLikeShotEdit = (has(/\bshot\b/) || has(/\bcamera\b/)) && (has(/\b(angle|framing|motion|action|description|negative|production)\b/) || has(/\b(update|edit|change|modify|set|replace)\b/));
+
+    if (looksLikeSceneEdit) {
+      appendAuditEvent(context.projectId, { type: 'assistant_message', summary: 'Heuristic: Scene Field Edit detected' });
+      const { skillResult: result } = await executeSkill('updateScene', context, userText);
+      const res = result as SkillResult | null;
+      assistantMessages.push(res?.message || 'Ready.');
+      if (res?.proposal) appendAuditEvent(context.projectId, { type: 'proposal_created', summary: res.proposal.summary });
+      for (const msg of assistantMessages) appendAuditEvent(context.projectId, { type: 'assistant_message', summary: msg });
+      return { assistantMessages, skillResult: res };
+    }
+    if (looksLikeShotEdit) {
+      appendAuditEvent(context.projectId, { type: 'assistant_message', summary: 'Heuristic: Shot Field Edit detected' });
+      const { skillResult: result } = await executeSkill('updateShot', context, userText);
+      const res = result as SkillResult | null;
+      assistantMessages.push(res?.message || 'Ready.');
+      if (res?.proposal) appendAuditEvent(context.projectId, { type: 'proposal_created', summary: res.proposal.summary });
+      for (const msg of assistantMessages) appendAuditEvent(context.projectId, { type: 'assistant_message', summary: msg });
+      return { assistantMessages, skillResult: res };
+    }
+  }
+
   if (gate) {
     // Let the copilot "think first": only run direct skills when the intent gate says
     // the user wants a plan or an action (writes require write_intent=true).
-    if (parsedIntent && gate.mode !== 'discussion') {
-      const directProposalSkills = new Set(['createWorkflow', 'addScene']);
-      const directPlanSkills = new Set(['generateCanon', 'updateCanon', 'generateScenes', 'generateShotPlans', 'generateShots']);
+    if (parsedIntent && (gate.mode === 'action' || gate.mode === 'plan')) {
+      const directProposalSkills = new Set([
+        'createWorkflow',
+        'updateWorkflowStoryInput',
+        'addScene',
+        'updateScene',
+        'updateShot',
+        'improveShotPrompt',
+      ]);
+      const directPlanSkills = new Set([
+        'generateCanon',
+        'updateCanon',
+        'generateScenes',
+        'generateShotPlans',
+        'generateShots',
+      ]);
       const allowed =
         gate.mode === 'plan' ||
         (gate.mode === 'action' && gate.write_intent);
       if (allowed && (directProposalSkills.has(parsedIntent.skillName) || directPlanSkills.has(parsedIntent.skillName))) {
         const effectiveInput =
-          parsedIntent.skillName === 'updateCanon' ? attachDiscussionContext(baseUserText, conversation) : baseUserText;
-        const { skillResult } = await executeSkill(parsedIntent.skillName as SkillName, context, effectiveInput);
+          parsedIntent.skillName === 'updateCanon'
+            ? attachDiscussionContext(baseUserText, conversation)
+            : baseUserText;
+
+        const { skillResult } = await executeSkill(
+          parsedIntent.skillName as SkillName,
+          context,
+          effectiveInput
+        );
         const result = skillResult as SkillResult | null;
-        const ui = parsedIntent.skillName === 'updateCanon' ? extractCanonDraftUi(result) : undefined;
+
+        // Custom UI for specific skills
+        let ui: CopilotTurnOutput['ui'] = undefined;
+        if (parsedIntent.skillName === 'updateCanon') ui = extractCanonDraftUi(result);
+        if (parsedIntent.skillName === 'improveShotPrompt') ui = extractShotPromptUi(result);
+
         assistantMessages.push(result?.message || 'Ready.');
-        if (result?.proposal) appendAuditEvent(context.projectId, { type: 'proposal_created', summary: result.proposal.summary });
-        for (const msg of assistantMessages) appendAuditEvent(context.projectId, { type: 'assistant_message', summary: msg });
+        if (ui?.shotPrompt) assistantMessages.push(formatShotPromptSuggestionForChat(ui.shotPrompt));
+        if (result?.proposal) {
+          appendAuditEvent(context.projectId, {
+            type: 'proposal_created',
+            summary: result.proposal.summary,
+          });
+        }
+        for (const msg of assistantMessages) {
+          appendAuditEvent(context.projectId, { type: 'assistant_message', summary: msg });
+        }
         if (result?.plan) {
           assistantMessages.push(formatPlanForChat(result.plan));
-          for (const msg of assistantMessages.slice(-1)) appendAuditEvent(context.projectId, { type: 'assistant_message', summary: msg });
-          appendAuditEvent(context.projectId, { type: 'planner_plan', summary: `Plan (skill): ${result.plan.intent}` });
+          for (const msg of assistantMessages.slice(-1)) {
+            appendAuditEvent(context.projectId, { type: 'assistant_message', summary: msg });
+          }
+          appendAuditEvent(context.projectId, {
+            type: 'planner_plan',
+            summary: `Plan (skill): ${result.plan.intent}`,
+          });
           return { assistantMessages, skillResult: result, ui: { plan: result.plan, planContext: '' } };
         }
         return { assistantMessages, skillResult: result ?? null, ui: ui ?? undefined };
@@ -603,19 +743,20 @@ export async function runCopilotTurn(
     }
 
     if (gate.mode === 'discussion' || (gate.mode === 'action' && !gate.write_intent)) {
-      if (gate.target === 'canon') {
+      const isStoryRelated = /\b(character|allan|appearance|clothing|personality|theme|vibe|look|style|canon|world|consistent)\b/i.test(userText);
+      if (gate.target === 'canon' && isStoryRelated) {
         const effectiveInput = attachDiscussionContext(baseUserText, conversation);
         const { skillResult } = await executeSkill('updateCanon', context, effectiveInput);
         const result = skillResult as SkillResult | null;
         const ui = extractCanonDraftUi(result);
         assistantMessages.push(result?.message || 'Got it.');
         for (const m of assistantMessages) appendAuditEvent(context.projectId, { type: 'assistant_message', summary: m });
-        return { assistantMessages, skillResult: result ?? null, ui: ui ?? undefined };
+        return { assistantMessages, skillResult: result ?? null, ui: ui ?? undefined, shouldWipeContext: isSimple };
       }
       const msg = await chatFallback(context, baseUserText);
       assistantMessages.push(msg);
       for (const m of assistantMessages) appendAuditEvent(context.projectId, { type: 'assistant_message', summary: m });
-      return { assistantMessages, skillResult: null };
+      return { assistantMessages, skillResult: null, shouldWipeContext: isSimple };
     }
 
     if (gate.mode === 'action' && gate.write_intent && gate.target === 'canon') {
@@ -630,84 +771,95 @@ export async function runCopilotTurn(
         assistantMessages.push(formatPlanForChat(result.plan));
         for (const m of assistantMessages.slice(-1)) appendAuditEvent(context.projectId, { type: 'assistant_message', summary: m });
         appendAuditEvent(context.projectId, { type: 'planner_plan', summary: `Plan (skill): ${result.plan.intent}` });
-        return { assistantMessages, skillResult: result, ui: { plan: result.plan, planContext: '' } };
+        return { assistantMessages, skillResult: result, ui: { plan: result.plan, planContext: '' }, shouldWipeContext: isSimple };
       }
-      return { assistantMessages, skillResult: result ?? null, ui: ui ?? undefined };
+      return { assistantMessages, skillResult: result ?? null, ui: ui ?? undefined, shouldWipeContext: isSimple };
     }
   } else if (looksLikeChatOnlyQuestion(userText)) {
     // Non-semantic fallback.
     const msg = await chatFallback(context, userText);
     assistantMessages.push(msg);
     for (const m of assistantMessages) appendAuditEvent(context.projectId, { type: 'assistant_message', summary: m });
-    return { assistantMessages, skillResult: null };
+    return { assistantMessages, skillResult: null, shouldWipeContext: isSimple };
   }
 
-  const planned = await createExecutionPlan({ userText, context: contextBlock, toolContext: context });
-  if (planned.ok) {
-    const sanitized = stripApplyProposalUnlessExplicit(planned.plan, userText);
-    const plan = ensurePlanRequiresConfirmation(sanitized);
-    const hasQuestions = Boolean(plan.questions?.length);
-    const hasSteps = plan.steps.length > 0;
+  // Planner and skill fallback: ONLY if the gate explicitly allowed an action/plan,
+  // or if we have no gate but it doesn't look like a chat-only question.
+  const allowAction = gate ? gate.mode !== 'discussion' : !looksLikeChatOnlyQuestion(userText);
 
-    // If the planner only returns a "questions-only" plan with no steps, it’s usually a sign it
-    // didn’t understand the user question. Prefer a direct chat response instead of stalling.
-    if (hasQuestions && !hasSteps) {
-      const msg = await chatFallback(context, userText);
-      assistantMessages.push(msg);
-      for (const m of assistantMessages) appendAuditEvent(context.projectId, { type: 'assistant_message', summary: m });
-      return { assistantMessages, skillResult: null };
+  if (allowAction) {
+    const planned = await createExecutionPlan({ userText, context: contextBlock, toolContext: context });
+    if (planned.ok) {
+      const sanitized = stripApplyProposalUnlessExplicit(planned.plan, userText);
+      const plan = ensurePlanRequiresConfirmation(sanitized);
+      const hasQuestions = Boolean(plan.questions?.length);
+      const hasSteps = plan.steps.length > 0;
+
+      if (hasQuestions && !hasSteps) {
+        const msg = await chatFallback(context, userText);
+        assistantMessages.push(msg);
+        for (const m of assistantMessages) {
+          appendAuditEvent(context.projectId, { type: 'assistant_message', summary: m });
+        }
+        return { assistantMessages, skillResult: null, shouldWipeContext: isSimple };
+      }
+
+      appendAuditEvent(context.projectId, {
+        type: 'planner_plan',
+        summary: `Plan: ${plan.intent}`,
+      });
+      if (hasQuestions || hasSteps) {
+        assistantMessages.push(formatPlanForChat(plan));
+        for (const msg of assistantMessages) {
+          appendAuditEvent(context.projectId, { type: 'assistant_message', summary: msg });
+        }
+        return {
+          assistantMessages,
+          skillResult: null,
+          ui: { plan, planContext: contextBlock },
+          shouldWipeContext: isSimple
+        };
+      }
     }
 
-    appendAuditEvent(context.projectId, {
-      type: 'planner_plan',
-      summary: `Plan: ${plan.intent}`,
-    });
-    if (hasQuestions) {
-      assistantMessages.push(formatPlanForChat(plan));
-      for (const msg of assistantMessages) appendAuditEvent(context.projectId, { type: 'assistant_message', summary: msg });
-      return {
-        assistantMessages,
-        skillResult: null,
-        ui: { plan, planContext: contextBlock },
-      };
-    }
+    // Skill fallback (last resort for confirmed actions)
+    if (
+      parsedIntent &&
+      parsedIntent.confidence > 0.5 &&
+      (gate?.mode === 'action' || gate?.mode === 'plan' || !gate)
+    ) {
+      const { skillResult, shouldChat } = await executeSkill(
+        parsedIntent.skillName as SkillName,
+        context,
+        userText
+      );
+      const result = skillResult as SkillResult | null;
 
-    if (hasSteps) {
-      assistantMessages.push(formatPlanForChat(plan));
-      for (const msg of assistantMessages) appendAuditEvent(context.projectId, { type: 'assistant_message', summary: msg });
-      return {
-        assistantMessages,
-        skillResult: null,
-        ui: { plan, planContext: contextBlock },
-      };
-    }
-  }
+      assistantMessages.push(result?.message || 'Done!');
+      const ui = parsedIntent.skillName === 'improveShotPrompt' ? extractShotPromptUi(result) : undefined;
 
-  // If planner didn't produce a plan, try skill routing as a fallback.
-  if (parsedIntent && parsedIntent.confidence > 0.5) {
-    const { skillResult, shouldChat } = await executeSkill(
-      parsedIntent.skillName as SkillName,
-      context,
-      userText
-    );
-    const result = skillResult as SkillResult | null;
-    assistantMessages.push(result?.message || 'Done!');
-    const ui = parsedIntent.skillName === 'improveShotPrompt' ? extractShotPromptUi(result) : undefined;
+      if (!result?.success || shouldChat) {
+        const chat = await chatFallback(context, userText);
+        if (chat.trim()) assistantMessages.push(chat.trim());
+      }
 
-    if (!result?.success || shouldChat) {
-      const chat = await chatFallback(context, userText);
-      if (chat.trim()) assistantMessages.push(chat.trim());
+      if (result?.proposal) {
+        appendAuditEvent(context.projectId, {
+          type: 'proposal_created',
+          summary: result.proposal.summary,
+        });
+      }
+      for (const msg of assistantMessages) {
+        appendAuditEvent(context.projectId, { type: 'assistant_message', summary: msg });
+      }
+      return { assistantMessages, skillResult: result, ui, shouldWipeContext: isSimple };
     }
-
-    if (result?.proposal) {
-      appendAuditEvent(context.projectId, { type: 'proposal_created', summary: result.proposal.summary });
-    }
-    for (const msg of assistantMessages) appendAuditEvent(context.projectId, { type: 'assistant_message', summary: msg });
-    return { assistantMessages, skillResult: result, ui };
   }
 
   const chat = await chatFallback(context, userText);
   assistantMessages.push(chat.trim() || 'No response generated.');
-  for (const msg of assistantMessages) appendAuditEvent(context.projectId, { type: 'assistant_message', summary: msg });
-  return { assistantMessages, skillResult: null };
+  for (const msg of assistantMessages) {
+    appendAuditEvent(context.projectId, { type: 'assistant_message', summary: msg });
+  }
+  return { assistantMessages, skillResult: null, shouldWipeContext: isSimple };
 }

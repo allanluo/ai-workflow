@@ -1,11 +1,21 @@
 export type ShotPlanItem = {
   id?: string;
-  shotNumber?: string | number;
-  description?: string;
+  shot?: string | number; // New standard
+  shotNumber?: string | number; // Legacy
+  action?: string; // New standard
+  description?: string; // Legacy
+  narration?: string;
+  internal_monologue?: string;
+  dialogue?: string;
+  characters?: string[];
+  environment?: string;
+  props?: string[];
   framing?: string;
   angle?: string;
   motion?: string;
   continuityNotes?: string;
+  frame_prompt?: string;
+  video_prompt?: string;
   image?: {
     prompt_structured?: string;
     prompt?: string;
@@ -18,7 +28,13 @@ export type ShotPlanItem = {
 };
 
 type ShotPlanScene = {
+  scene?: number;
   title?: string;
+  description?: string;
+  purpose?: string;
+  emotionalBeat?: string;
+  setting?: string;
+  shot_count?: number;
   shots?: ShotPlanItem[];
 };
 

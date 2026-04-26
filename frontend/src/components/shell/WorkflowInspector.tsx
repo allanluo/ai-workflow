@@ -127,10 +127,31 @@ function NodeConfigEditor({
     const runOutput = asString((latestNodeRun?.output_snapshot as any)?.text);
     const hasExistingEdit = Boolean(asString(node.params.edited_text));
     const queryClient = useQueryClient();
+    const isBypassed = Boolean(node.params.bypass);
 
     return (
-      <div>
-        <div className="flex items-center justify-between mb-1">
+      <div className="space-y-4">
+        <div className="flex items-center justify-between gap-3 p-3 rounded-xl bg-indigo-500/5 border border-indigo-500/10">
+          <div className="flex-1">
+            <h5 className="text-[11px] font-bold text-indigo-100 uppercase tracking-wider">
+              Bypass this step
+            </h5>
+            <p className="text-[10px] text-indigo-300/60 leading-tight mt-0.5">
+              Skip generation and use the latest manual edits for this asset instead.
+            </p>
+          </div>
+          <button
+            onClick={() => onChange({ ...node, params: { ...node.params, bypass: !isBypassed } })}
+            className={`w-10 h-5 rounded-full transition-colors relative ${isBypassed ? 'bg-indigo-500' : 'bg-slate-700'}`}
+          >
+            <div
+              className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-all ${isBypassed ? 'right-1' : 'left-1'}`}
+            />
+          </button>
+        </div>
+
+        <div>
+          <div className="flex items-center justify-between mb-1">
           <div className="flex items-center gap-2">
             <Label>Review & Edit Content</Label>
             <button
@@ -148,9 +169,14 @@ function NodeConfigEditor({
             >
               REFRESH DATA
             </button>
-            <div className="text-[8px] text-red-500 font-mono leading-none flex flex-col items-end">
-              <span>Local ID: {node.id.slice(0, 8)}...</span>
-              <span>API IDs: {availableIds.map(id => id.slice(0, 8)).join(', ') || 'NONE'}</span>
+            <div className="text-[9px] text-[var(--text-muted)] font-mono leading-tight flex flex-col items-end opacity-70">
+              <div className="flex items-center gap-1.5">
+                <span>Local: {node.id.slice(0, 8)}</span>
+                {availableIds.includes(node.id) && (
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shadow-[0_0_4px_rgba(16,185,129,0.5)]" title="Connected to Run Data" />
+                )}
+              </div>
+              <span>API: {availableIds.map(id => id.slice(0, 8)).join(', ') || 'NONE'}</span>
             </div>
           </div>
           {runOutput && !hasExistingEdit && (
@@ -164,7 +190,8 @@ function NodeConfigEditor({
             </button>
           )}
         </div>
-        <textarea
+      </div>
+      <textarea
           value={asString(node.params.edited_text) || runOutput}
           onChange={e =>
             onChange({ ...node, params: { ...node.params, edited_text: e.target.value } })
@@ -191,8 +218,29 @@ function NodeConfigEditor({
   }
 
   if (node.type === 'input') {
+    const isBypassed = Boolean(node.params.bypass);
     return (
-      <div>
+      <div className="space-y-4">
+        <div className="flex items-center justify-between gap-3 p-3 rounded-xl bg-emerald-500/5 border border-emerald-500/10">
+          <div className="flex-1">
+            <h5 className="text-[11px] font-bold text-emerald-100 uppercase tracking-wider">
+              Bypass this step
+            </h5>
+            <p className="text-[10px] text-emerald-300/60 leading-tight mt-0.5">
+              Use the existing story input instead of typed text.
+            </p>
+          </div>
+          <button
+            onClick={() => onChange({ ...node, params: { ...node.params, bypass: !isBypassed } })}
+            className={`w-10 h-5 rounded-full transition-colors relative ${isBypassed ? 'bg-emerald-500' : 'bg-slate-700'}`}
+          >
+            <div
+              className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-all ${isBypassed ? 'right-1' : 'left-1'}`}
+            />
+          </button>
+        </div>
+
+        <div>
         <Label>Input Text</Label>
         <textarea
           value={asString(node.params.text)}
@@ -201,12 +249,34 @@ function NodeConfigEditor({
           className={cls}
         />
       </div>
+      </div>
     );
   }
 
   if (node.type === 'llm_text') {
+    const isBypassed = Boolean(node.params.bypass);
     return (
-      <div className="space-y-3">
+      <div className="space-y-4">
+        <div className="flex items-center justify-between gap-3 p-3 rounded-xl bg-indigo-500/5 border border-indigo-500/10">
+          <div className="flex-1">
+            <h5 className="text-[11px] font-bold text-indigo-100 uppercase tracking-wider">
+              Bypass this step
+            </h5>
+            <p className="text-[10px] text-indigo-300/60 leading-tight mt-0.5">
+              Skip LLM generation and use the latest asset version instead.
+            </p>
+          </div>
+          <button
+            onClick={() => onChange({ ...node, params: { ...node.params, bypass: !isBypassed } })}
+            className={`w-10 h-5 rounded-full transition-colors relative ${isBypassed ? 'bg-indigo-500' : 'bg-slate-700'}`}
+          >
+            <div
+              className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-all ${isBypassed ? 'right-1' : 'left-1'}`}
+            />
+          </button>
+        </div>
+
+        <div className="space-y-3">
         <div>
           <Label>Prompt</Label>
           <textarea
@@ -227,12 +297,34 @@ function NodeConfigEditor({
           />
         </div>
       </div>
+      </div>
     );
   }
 
   if (node.type === 'image_generation' || node.type === 'video_generation') {
+    const isBypassed = Boolean(node.params.bypass);
     return (
-      <div className="space-y-3">
+      <div className="space-y-4">
+        <div className="flex items-center justify-between gap-3 p-3 rounded-xl bg-orange-500/5 border border-orange-500/10">
+          <div className="flex-1">
+            <h5 className="text-[11px] font-bold text-orange-100 uppercase tracking-wider">
+              Bypass this step
+            </h5>
+            <p className="text-[10px] text-orange-300/60 leading-tight mt-0.5">
+              Skip re-generation and use the previously generated asset version.
+            </p>
+          </div>
+          <button
+            onClick={() => onChange({ ...node, params: { ...node.params, bypass: !isBypassed } })}
+            className={`w-10 h-5 rounded-full transition-colors relative ${isBypassed ? 'bg-orange-500' : 'bg-slate-700'}`}
+          >
+            <div
+              className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-all ${isBypassed ? 'right-1' : 'left-1'}`}
+            />
+          </button>
+        </div>
+
+        <div className="space-y-3">
         <div>
           <Label>Prompt</Label>
           <textarea
@@ -269,6 +361,69 @@ function NodeConfigEditor({
           </div>
         </div>
       </div>
+      </div>
+    );
+  }
+
+  if (node.type === 'tts') {
+    const isBypassed = Boolean(node.params.bypass);
+    return (
+      <div className="space-y-4">
+        <div className="flex items-center justify-between gap-3 p-3 rounded-xl bg-sky-500/5 border border-sky-500/10">
+          <div className="flex-1">
+            <h5 className="text-[11px] font-bold text-sky-100 uppercase tracking-wider">
+              Bypass this step
+            </h5>
+            <p className="text-[10px] text-sky-300/60 leading-tight mt-0.5">
+              Use the existing narration asset instead of generating a new one.
+            </p>
+          </div>
+          <button
+            onClick={() => onChange({ ...node, params: { ...node.params, bypass: !isBypassed } })}
+            className={`w-10 h-5 rounded-full transition-colors relative ${isBypassed ? 'bg-sky-500' : 'bg-slate-700'}`}
+          >
+            <div
+              className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-all ${isBypassed ? 'right-1' : 'left-1'}`}
+            />
+          </button>
+        </div>
+
+        <div className="space-y-3">
+        <div>
+          <Label>Narration Text</Label>
+          <textarea
+            value={asString(node.params.text)}
+            onChange={e => onChange({ ...node, params: { ...node.params, text: e.target.value } })}
+            rows={4}
+            className={cls}
+          />
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <div>
+            <Label>Voice</Label>
+            <input
+              value={asString(node.params.template)}
+              onChange={e =>
+                onChange({ ...node, params: { ...node.params, template: e.target.value } })
+              }
+              className={cls}
+            />
+          </div>
+          <div>
+            <Label>Speed</Label>
+            <input
+              type="number"
+              step="0.1"
+              value={asNumber(node.params.speed)}
+              onChange={e =>
+                onChange({ ...node, params: { ...node.params, speed: Number(e.target.value) } })
+              }
+              className={cls}
+            />
+          </div>
+        </div>
+      </div>
+      </div>
     );
   }
 
@@ -285,10 +440,9 @@ export function WorkflowInspector({ workflowId }: { workflowId: string }) {
   const queryClient = useQueryClient();
   const projectId = useAppStore(s => s.currentProjectId);
   const { draft, setDraft } = useDraftStore();
-  const [freezeNotes, setFreezeNotes] = useState('');
   const [lastValidation, setLastValidation] = useState<WorkflowValidation | null>(null);
   const [activeSection, setActiveSection] = useState<
-    'settings' | 'steps' | 'connections' | 'json' | 'versions'
+    'settings' | 'steps' | 'connections' | 'json'
   >('settings');
   const selectedNodeId = useSelectionStore(s => s.selectedWorkflowNodeId);
   const prevSelectedNodeIdRef = useRef(selectedNodeId);
@@ -296,9 +450,12 @@ export function WorkflowInspector({ workflowId }: { workflowId: string }) {
   console.log('WorkflowInspector render - selectedNodeId:', selectedNodeId);
 
   useEffect(() => {
-    if (selectedNodeId && selectedNodeId !== prevSelectedNodeIdRef.current) {
+    if (selectedNodeId) {
       setActiveSection('steps');
+      // We still update the ref, but we allow switching sections even if the ID is the same
+      // because the user might have navigated away to 'settings' and clicked EDIT again.
       prevSelectedNodeIdRef.current = selectedNodeId;
+
       setTimeout(() => {
         const el = document.getElementById(`node-config-${selectedNodeId}`);
         if (el) {
@@ -395,21 +552,6 @@ export function WorkflowInspector({ workflowId }: { workflowId: string }) {
     },
   });
 
-  const freezeMutation = useMutation({
-    mutationFn: createWorkflowVersion,
-    onSuccess: v => {
-      queryClient.invalidateQueries({ queryKey: ['workflow-versions', workflowId] });
-      queryClient.invalidateQueries({ queryKey: ['project-workflows', projectId] });
-      setFreezeNotes('');
-      showToast({ type: 'success', title: 'Version frozen', message: `v${v.version_number}` });
-    },
-    onError: err =>
-      showToast({
-        type: 'error',
-        title: 'Freeze failed',
-        message: err instanceof Error ? err.message : 'Unknown error',
-      }),
-  });
 
   async function handleSave() {
     if (!draft) return;
@@ -428,13 +570,6 @@ export function WorkflowInspector({ workflowId }: { workflowId: string }) {
     await validateMutation.mutateAsync(workflowId);
   }
 
-  async function handleFreeze() {
-    await handleSave();
-    await freezeMutation.mutateAsync({
-      workflowId,
-      notes: freezeNotes.trim() || 'Frozen from inspector',
-    });
-  }
 
   if (workflowQuery.isLoading) {
     return <p className="text-sm text-[var(--text-muted)]">Loading workflow...</p>;
@@ -449,7 +584,6 @@ export function WorkflowInspector({ workflowId }: { workflowId: string }) {
     { id: 'steps', label: 'Steps' },
     { id: 'connections', label: 'Edges' },
     { id: 'json', label: 'JSON' },
-    { id: 'versions', label: 'Versions' },
   ] as const;
 
   return (
@@ -542,15 +676,7 @@ export function WorkflowInspector({ workflowId }: { workflowId: string }) {
             </div>
           </Section>
 
-          <Section title="Freeze Notes">
-            <textarea
-              value={freezeNotes}
-              onChange={e => setFreezeNotes(e.target.value)}
-              rows={4}
-              placeholder="Describe what changed and why this is ready to freeze…"
-              className={inputCls()}
-            />
-          </Section>
+
 
           {lastValidation && (
             <Section title="Last Validation">
@@ -839,20 +965,7 @@ export function WorkflowInspector({ workflowId }: { workflowId: string }) {
         </div>
       )}
 
-      {/* ── Versions ── */}
-      {activeSection === 'versions' && (
-        <div className="space-y-2">
-          {versionsQuery.isLoading ? (
-            <p className="text-xs text-[var(--text-muted)]">Loading…</p>
-          ) : versionsQuery.data && versionsQuery.data.length > 0 ? (
-            versionsQuery.data.map(v => <VersionRow key={v.id} version={v} />)
-          ) : (
-            <p className="rounded-xl border border-dashed border-[var(--border)] px-3 py-6 text-center text-xs text-[var(--text-muted)]">
-              No frozen versions yet.
-            </p>
-          )}
-        </div>
-      )}
+
     </div>
   );
 }

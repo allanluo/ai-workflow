@@ -1,5 +1,5 @@
 import { ReactNode, useRef } from 'react';
-import { useParams } from 'react-router-dom';
+import { useLocation } from 'react-router-dom';
 import { usePanelStore } from '../../stores';
 import { useEventStream } from '../../hooks/useEventStream';
 import { MenuBar } from './MenuBar';
@@ -13,7 +13,8 @@ interface ShellProps {
 }
 
 export function Shell({ children }: ShellProps) {
-  const { projectId } = useParams<{ projectId: string }>();
+  const { pathname } = useLocation();
+  const projectId = pathname.match(/\/projects\/([^/]+)/)?.[1];
   useEventStream(projectId);
   const { rightPanelOpen, rightPanelWidth, setRightPanelWidth } = usePanelStore();
   const isResizingRef = useRef(false);

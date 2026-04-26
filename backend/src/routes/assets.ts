@@ -305,6 +305,7 @@ export async function registerAssetRoutes(app: FastifyInstance) {
     const body = z
       .object({
         prompt: z.string(),
+        negative_prompt: z.string().optional(),
         width: z.number().optional().default(1024),
         height: z.number().optional().default(1024),
       })
@@ -315,6 +316,7 @@ export async function registerAssetRoutes(app: FastifyInstance) {
     try {
       const response = await generateImage({
         prompt: body.prompt,
+        negative_prompt: body.negative_prompt,
         width: body.width,
         height: body.height,
       });

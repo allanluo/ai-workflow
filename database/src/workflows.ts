@@ -583,8 +583,8 @@ export function createWorkflowVersion(workflowId: string, input: CreateWorkflowV
     .orderBy(desc(workflowVersions.versionNumber))
     .get();
 
-  const versionNumber = latestVersion ? latestVersion.versionNumber + 1 : 1;
-  const id = randomUUID();
+  let id = latestVersion?.id ?? randomUUID();
+  const versionNumber = 1;
   const frozenWorkflow = {
     title: workflow.title,
     description: workflow.description,
@@ -599,28 +599,42 @@ export function createWorkflowVersion(workflowId: string, input: CreateWorkflowV
   const graphHash = computeGraphHash(frozenWorkflow);
   const timestamp = new Date().toISOString();
 
-  db.insert(workflowVersions)
-    .values({
-      id,
-      workflowDefinitionId: workflowId,
-      projectId: workflow.project_id,
-      versionNumber,
-      status: 'approved',
-      approvedBy: 'user',
-      approvedAt: timestamp,
-      graphHash,
-      templateType: workflow.template_type,
-      frozenWorkflowJson: JSON.stringify(frozenWorkflow),
-      inputAssetVersionsJson: JSON.stringify(input.input_asset_versions ?? {}),
-      runtimeEnvironmentJson: JSON.stringify(input.runtime_environment ?? {}),
-      notes: input.notes ?? '',
-      createdAt: timestamp,
-    })
-    .run();
+  if (latestVersion) {
+    db.update(workflowVersions)
+      .set({
+        graphHash,
+        templateType: workflow.template_type,
+        frozenWorkflowJson: JSON.stringify(frozenWorkflow),
+        inputAssetVersionsJson: JSON.stringify(input.input_asset_versions ?? {}),
+        runtimeEnvironmentJson: JSON.stringify(input.runtime_environment ?? {}),
+        notes: input.notes ?? 'Auto-synced version',
+      })
+      .where(eq(workflowVersions.id, latestVersion.id))
+      .run();
+  } else {
+    db.insert(workflowVersions)
+      .values({
+        id,
+        workflowDefinitionId: workflowId,
+        projectId: workflow.project_id,
+        versionNumber,
+        status: 'frozen',
+        approvedBy: null,
+        approvedAt: null,
+        graphHash,
+        templateType: workflow.template_type,
+        frozenWorkflowJson: JSON.stringify(frozenWorkflow),
+        inputAssetVersionsJson: JSON.stringify(input.input_asset_versions ?? {}),
+        runtimeEnvironmentJson: JSON.stringify(input.runtime_environment ?? {}),
+        notes: input.notes ?? 'Initial version',
+        createdAt: timestamp,
+      })
+      .run();
+  }
 
   db.update(workflowDefinitions)
     .set({
-      status: 'approved',
+      status: 'testing',
       updatedAt: timestamp,
     })
     .where(eq(workflowDefinitions.id, workflowId))
@@ -652,4 +666,41 @@ export function getWorkflowVersionById(workflowVersionId: string) {
     .get();
 
   return row ? mapWorkflowVersion(row) : null;
+}
+
+export function approveWorkflowVersion(versionId: string, approvedBy: string = 'user') {
+  const version = db
+    .select()
+    .from(workflowVersions)
+    .where(eq(workflowVersions.id, versionId))
+    .get();
+
+  if (!version) return null;
+
+  const timestamp = new Date().toISOString();
+
+  db.update(workflowVersions)
+    .set({
+      status: 'approved',
+      approvedBy,
+      approvedAt: timestamp,
+    })
+    .where(eq(workflowVersions.id, versionId))
+    .run();
+
+  db.update(workflowDefinitions)
+    .set({
+      status: 'approved',
+      updatedAt: timestamp,
+    })
+    .where(eq(workflowDefinitions.id, version.workflowDefinitionId))
+    .run();
+
+  insertWorkflowEvent(version.projectId, version.workflowDefinitionId, 'workflow_version_approved', {
+    workflow_version_id: versionId,
+    version_number: version.versionNumber,
+    approved_by: approvedBy,
+  });
+
+  return getWorkflowVersionById(versionId);
 }

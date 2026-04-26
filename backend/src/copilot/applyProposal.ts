@@ -219,27 +219,35 @@ export async function applyCopilotProposal(input: {
       };
     }
 
-    const nextContent = applyJsonPatch(baseContent, proposal.patch as any);
-    const version = createAssetVersion(asset.id, {
-      content: nextContent,
-      source_mode: 'copilot',
-      status: 'draft',
-      make_current: true,
-      metadata: {
-        copilot: {
-          proposal_summary: proposal.summary,
-          base_asset_version_id: proposal.baseAssetVersionId ?? null,
-          applied_at: new Date().toISOString(),
+    try {
+      const nextContent = applyJsonPatch(baseContent, proposal.patch as any);
+      const version = createAssetVersion(asset.id, {
+        content: nextContent,
+        source_mode: 'copilot',
+        status: 'draft',
+        make_current: true,
+        metadata: {
+          copilot: {
+            proposal_summary: proposal.summary,
+            base_asset_version_id: proposal.baseAssetVersionId ?? null,
+            applied_at: new Date().toISOString(),
+          },
         },
-      },
-    });
-    if (!version) return { ok: false, warning: 'Failed to create asset version.' };
-    return {
-      ok: true,
-      assetId: asset.id,
-      assetVersionId: version.id,
-      warning: baseMismatch ? 'Base version changed since proposal was generated.' : undefined,
-    };
+      });
+      if (!version) return { ok: false, warning: 'Failed to create asset version.' };
+      return {
+        ok: true,
+        assetId: asset.id,
+        assetVersionId: version.id,
+        warning: baseMismatch ? 'Base version changed since proposal was generated.' : undefined,
+      };
+    } catch (err) {
+      console.error('[Copilot] Apply patch failed:', err);
+      return {
+        ok: false,
+        warning: err instanceof Error ? err.message : 'Failed to apply patch.',
+      };
+    }
   }
 
   if (proposal.kind === 'create_workflow') {

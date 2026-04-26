@@ -74,8 +74,16 @@ export function ProjectDetailPage() {
 
   // Count assets by type
   const sourceCount = assets.filter(a => a.asset_category === 'source').length;
-  const canonCount = assets.filter(a => a.asset_category === 'canon').length;
-  const sceneCount = assets.filter(a => a.asset_type === 'scene').length;
+  const canonCount = assets.filter(
+    a => a.asset_category === 'canon' || a.asset_type === 'canon_text'
+  ).length;
+  const sceneCount = assets.filter(a => {
+    if (a.asset_type === 'scene') return true;
+    const content = (a.current_version?.content || {}) as Record<string, any>;
+    const hasScenes = Array.isArray(content.scenes);
+    const hasRawScenes = typeof content._raw === 'string' && content._raw.includes('"scenes"');
+    return hasScenes || hasRawScenes;
+  }).length;
   const shotCount = assets.filter(a => a.asset_type === 'shot').length;
 
   // Get latest run

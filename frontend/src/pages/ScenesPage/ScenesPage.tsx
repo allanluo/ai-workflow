@@ -6,6 +6,8 @@ import { SceneToolbar } from './SceneToolbar';
 import { ScenePreview } from './ScenePreview';
 import { SceneEditorPanel, type SceneItem } from '../../components/SceneEditorPanel';
 
+import { useSelectionStore } from '../../stores';
+
 interface ScenesPageProps {
   projectId: string;
 }
@@ -53,9 +55,14 @@ function getSceneSubtitle(asset: Asset): string {
 
   const content = (asset.current_version?.content ?? {}) as Record<string, unknown>;
   const purpose = typeof content.purpose === 'string' ? content.purpose : '';
-  const emotionalBeat = typeof content.emotionalBeat === 'string' ? content.emotionalBeat : '';
+  const emotional_beat =
+    typeof content.emotional_beat === 'string'
+      ? content.emotional_beat
+      : typeof content.emotionalBeat === 'string'
+        ? content.emotionalBeat
+        : '';
   const setting = typeof content.setting === 'string' ? content.setting : '';
-  return purpose || emotionalBeat || setting || 'No description';
+  return purpose || emotional_beat || setting || 'No description';
 }
 
 function toStatus(approvalState: string): SceneListItem['status'] {
@@ -72,14 +79,14 @@ function toBatchSceneItems(asset: Asset): SceneItem[] | null {
     .map(raw => {
       const title = typeof raw.title === 'string' ? raw.title : '';
       const purpose = typeof raw.purpose === 'string' ? raw.purpose : '';
-      const emotionalBeat =
-        typeof raw.emotionalBeat === 'string'
-          ? raw.emotionalBeat
-          : typeof (raw as Record<string, unknown>).emotional_beat === 'string'
-            ? ((raw as Record<string, unknown>).emotional_beat as string)
+      const emotional_beat =
+        typeof raw.emotional_beat === 'string'
+          ? raw.emotional_beat
+          : typeof (raw as Record<string, unknown>).emotionalBeat === 'string'
+            ? ((raw as Record<string, unknown>).emotionalBeat as string)
             : '';
       const setting = typeof raw.setting === 'string' ? raw.setting : '';
-      const item: SceneItem = { title, purpose, emotionalBeat, setting };
+      const item: SceneItem = { title, purpose, emotional_beat, setting };
       const hasAny = Object.values(item).some(v => typeof v === 'string' && v.trim());
       return hasAny ? item : null;
     })
@@ -90,37 +97,47 @@ function toBatchSceneItems(asset: Asset): SceneItem[] | null {
 
 export function ScenesPage({ projectId }: ScenesPageProps) {
   const queryClient = useQueryClient();
+  const selectedWorkflowId = useSelectionStore(s => s.selectedWorkflowId);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
   const [batchScenesDraft, setBatchScenesDraft] = useState<SceneItem[] | null>(null);
   const [batchSceneIndex, setBatchSceneIndex] = useState(0);
 
   const scenesQuery = useQuery({
-    queryKey: ['project-assets', projectId, 'scene'],
+    // Use a dedicated query key so other tabs observing `project-assets` never accidentally
+    // inherit scene-only selections (and vice versa).
+    queryKey: ['project-scenes', projectId, selectedWorkflowId],
     queryFn: () => fetchProjectAssets(projectId),
     enabled: Boolean(projectId),
+    // Scenes tab should only show scene outline assets. Shot plans may also contain a "scenes" array,
+    // but they belong in the Shots tab and were confusing users (scenes appeared "generated" even when
+    // the generate_scenes node failed).
     select: assets => assets.filter(a => a.asset_type === 'scene'),
   });
 
   const visibleScenes = useMemo(() => {
-    const scenes = scenesQuery.data ?? [];
+    const scenes = [...(scenesQuery.data ?? [])];
 
     const isImportedSingleScene = (asset: Asset) =>
       typeof (asset.metadata as Record<string, unknown> | undefined)?.imported_from_asset_id ===
       'string';
 
-    const isGeneratedSceneBatch = (asset: Asset) => {
-      const list = extractSceneList(asset);
-      return Boolean(list && list.length > 0);
-    };
+    const filtered = scenes.filter(asset => {
+      if (isImportedSingleScene(asset)) return false;
+      
+      // Always show explicit scene assets (unless imported singletons)
+      return asset.asset_type === 'scene' && asset.status !== 'deprecated';
+    });
 
-    return scenes
-      .filter(asset => {
-        if (isImportedSingleScene(asset)) return false;
-        if (asset.status !== 'deprecated') return true;
-        return isGeneratedSceneBatch(asset);
-      })
-      .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
-  }, [scenesQuery.data]);
+    const filteredByWorkflow = filtered.filter(asset => {
+      if (!selectedWorkflowId) return true;
+      const meta = asset.metadata as Record<string, unknown> | null;
+      return meta?.workflow_id === selectedWorkflowId;
+    });
+
+    filteredByWorkflow.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+
+    return filteredByWorkflow;
+  }, [scenesQuery.data, selectedWorkflowId]);
 
   const sceneItems: SceneListItem[] = useMemo(
     () =>
@@ -139,11 +156,41 @@ export function ScenesPage({ projectId }: ScenesPageProps) {
     [visibleScenes]
   );
 
+  // Track if the current selection was chosen because it matches the workflow
+  const [autoSelectedForWorkflowId, setAutoSelectedForWorkflowId] = useState<string | null>(null);
+
   useEffect(() => {
-    if (!selectedAssetId && sceneItems.length > 0) {
-      setSelectedAssetId(sceneItems[0].assetId);
+    if (sceneItems.length === 0) return;
+
+    const topAssetId = sceneItems[0].assetId;
+    const topAsset = visibleScenes.find(a => a.id === topAssetId);
+    const topAssetMatches = selectedWorkflowId && (topAsset?.metadata as Record<string, unknown> | undefined)?.workflow_id === selectedWorkflowId;
+
+    // SCENARIO 1: First time selection or selection lost
+    if (!selectedAssetId || !sceneItems.some(item => item.assetId === selectedAssetId)) {
+      setSelectedAssetId(topAssetId);
+      if (topAssetMatches) setAutoSelectedForWorkflowId(selectedWorkflowId);
+      return;
     }
-  }, [sceneItems, selectedAssetId]);
+
+    // SCENARIO 2: Workflow changed, OR a NEW run finished for the SAME workflow
+    const canAutoJump = selectedWorkflowId === autoSelectedForWorkflowId;
+    if (selectedWorkflowId && topAssetMatches && selectedAssetId !== topAssetId && canAutoJump) {
+      setSelectedAssetId(topAssetId);
+      setAutoSelectedForWorkflowId(selectedWorkflowId);
+      return;
+    }
+
+    // SCENARIO 3: Workflow changed but no match found yet
+    if (selectedWorkflowId && selectedWorkflowId !== autoSelectedForWorkflowId) {
+      if (topAssetMatches) {
+        setSelectedAssetId(topAssetId);
+        setAutoSelectedForWorkflowId(selectedWorkflowId);
+      } else {
+        setAutoSelectedForWorkflowId(selectedWorkflowId);
+      }
+    }
+  }, [sceneItems, selectedAssetId, selectedWorkflowId, visibleScenes, autoSelectedForWorkflowId]);
 
   const selectedItem = sceneItems.find(s => s.assetId === selectedAssetId) ?? null;
   const selectedAsset = visibleScenes.find(a => a.id === selectedAssetId) ?? null;
@@ -168,7 +215,9 @@ export function ScenesPage({ projectId }: ScenesPageProps) {
   const createMutation = useMutation({
     mutationFn: createAsset,
     onSuccess: asset => {
+      // Keep both the generic assets cache and the scenes-only cache in sync.
       queryClient.invalidateQueries({ queryKey: ['project-assets', projectId] });
+      queryClient.invalidateQueries({ queryKey: ['project-scenes', projectId] });
       setSelectedAssetId(asset.id);
     },
   });
@@ -180,7 +229,7 @@ export function ScenesPage({ projectId }: ScenesPageProps) {
       asset_category: 'story',
       title: 'New Scene',
       content: { order: (visibleScenes.length ?? 0) + 1 },
-      metadata: {},
+      metadata: selectedWorkflowId ? { workflow_id: selectedWorkflowId } : {},
       source_mode: 'manual',
     });
   };
@@ -208,7 +257,7 @@ export function ScenesPage({ projectId }: ScenesPageProps) {
               isBatchAsset
                 ? effectiveBatchScenes!.map((s, idx) => ({
                     title: s.title || `Scene ${idx + 1}`,
-                    subtitle: s.emotionalBeat || s.purpose || s.setting || '',
+                    subtitle: s.emotional_beat || s.purpose || s.setting || '',
                   }))
                 : null
             }

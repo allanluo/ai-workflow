@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { persist, createJSONStorage } from 'zustand/middleware';
 
 interface SelectionState {
   selectedAssetId: string | null;
@@ -25,59 +26,16 @@ interface SelectionActions {
   selectScene: (sceneId: string) => void;
   selectFile: (fileId: string) => void;
   selectWorkflowNode: (nodeId: string | null) => void;
+  triggerExport: () => void;
   clearSelection: () => void;
   clearAssetSelection: () => void;
   clearWorkflowSelection: () => void;
   clearOutputSelection: () => void;
 }
 
-export const useSelectionStore = create<SelectionState & SelectionActions>()(set => ({
-  selectedAssetId: null,
-  selectedAssetVersionId: null,
-  selectedWorkflowId: null,
-  selectedWorkflowVersionId: null,
-  selectedWorkflowRunId: null,
-  selectedOutputId: null,
-  selectedOutputVersionId: null,
-  selectedShotId: null,
-  selectedShotPlanAssetId: null,
-  selectedSceneId: null,
-  selectedFileId: null,
-  selectedWorkflowNodeId: null,
-
-  selectAsset: (assetId, versionId = null) =>
-    set({
-      selectedAssetId: assetId,
-      selectedAssetVersionId: versionId,
-    }),
-
-  selectWorkflow: (workflowId, versionId = null) =>
-    set({
-      selectedWorkflowId: workflowId,
-      selectedWorkflowVersionId: versionId,
-    }),
-
-  selectWorkflowRun: runId => set({ selectedWorkflowRunId: runId }),
-
-  selectOutput: (outputId, versionId = null) =>
-    set({
-      selectedOutputId: outputId,
-      selectedOutputVersionId: versionId,
-    }),
-
-  selectShot: (shotId, shotPlanAssetId = null) =>
-    set({ selectedShotId: shotId, selectedShotPlanAssetId: shotPlanAssetId }),
-
-  selectShotPlan: assetId => set({ selectedShotPlanAssetId: assetId }),
-
-  selectScene: sceneId => set({ selectedSceneId: sceneId }),
-
-  selectFile: fileId => set({ selectedFileId: fileId }),
-
-  selectWorkflowNode: nodeId => set({ selectedWorkflowNodeId: nodeId }),
-
-  clearSelection: () =>
-    set({
+export const useSelectionStore = create<SelectionState & SelectionActions>()(
+  persist(
+    set => ({
       selectedAssetId: null,
       selectedAssetVersionId: null,
       selectedWorkflowId: null,
@@ -90,24 +48,78 @@ export const useSelectionStore = create<SelectionState & SelectionActions>()(set
       selectedSceneId: null,
       selectedFileId: null,
       selectedWorkflowNodeId: null,
-    }),
+      triggerExportCount: 0,
 
-  clearAssetSelection: () =>
-    set({
-      selectedAssetId: null,
-      selectedAssetVersionId: null,
-    }),
+      selectAsset: (assetId, versionId = null) =>
+        set({
+          selectedAssetId: assetId,
+          selectedAssetVersionId: versionId,
+        }),
 
-  clearWorkflowSelection: () =>
-    set({
-      selectedWorkflowId: null,
-      selectedWorkflowVersionId: null,
-      selectedWorkflowRunId: null,
-    }),
+      selectWorkflow: (workflowId, versionId = null) =>
+        set({
+          selectedWorkflowId: workflowId,
+          selectedWorkflowVersionId: versionId,
+        }),
 
-  clearOutputSelection: () =>
-    set({
-      selectedOutputId: null,
-      selectedOutputVersionId: null,
+      selectWorkflowRun: runId => set({ selectedWorkflowRunId: runId }),
+
+      selectOutput: (outputId, versionId = null) =>
+        set({
+          selectedOutputId: outputId,
+          selectedOutputVersionId: versionId,
+        }),
+
+      selectShot: (shotId, shotPlanAssetId = null) =>
+        set({ selectedShotId: shotId, selectedShotPlanAssetId: shotPlanAssetId }),
+
+      selectShotPlan: assetId => set({ selectedShotPlanAssetId: assetId }),
+
+      selectScene: sceneId => set({ selectedSceneId: sceneId }),
+
+      selectFile: fileId => set({ selectedFileId: fileId }),
+
+      selectWorkflowNode: nodeId => set({ selectedWorkflowNodeId: nodeId }),
+      triggerExport: () => set(state => ({ triggerExportCount: state.triggerExportCount + 1 })),
+
+      clearSelection: () =>
+        set({
+          selectedAssetId: null,
+          selectedAssetVersionId: null,
+          selectedWorkflowId: null,
+          selectedWorkflowVersionId: null,
+          selectedWorkflowRunId: null,
+          selectedOutputId: null,
+          selectedOutputVersionId: null,
+          selectedShotId: null,
+          selectedShotPlanAssetId: null,
+          selectedSceneId: null,
+          selectedFileId: null,
+          selectedWorkflowNodeId: null,
+        }),
+
+      clearAssetSelection: () =>
+        set({
+          selectedAssetId: null,
+          selectedAssetVersionId: null,
+        }),
+
+      clearWorkflowSelection: () =>
+        set({
+          selectedWorkflowId: null,
+          selectedWorkflowVersionId: null,
+          selectedWorkflowRunId: null,
+        }),
+
+      clearOutputSelection: () =>
+        set({
+          selectedOutputId: null,
+          selectedOutputVersionId: null,
+        }),
     }),
-}));
+    {
+      name: 'ai-workflow-selection',
+      storage: createJSONStorage(() => localStorage),
+    }
+  )
+);

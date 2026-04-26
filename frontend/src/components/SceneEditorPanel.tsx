@@ -16,7 +16,7 @@ interface SceneEditorPanelProps {
 export type SceneItem = {
   title: string;
   purpose: string;
-  emotionalBeat: string;
+  emotional_beat: string;
   setting: string;
 };
 
@@ -41,7 +41,7 @@ export function SceneEditorPanel({
 
   // Single-scene fields
   const [purpose, setPurpose] = useState('');
-  const [emotionalBeat, setEmotionalBeat] = useState('');
+  const [emotional_beat, setEmotionalBeat] = useState('');
   const [setting, setSetting] = useState('');
 
   // Batch (scenes[]) fields (optionally controlled by parent)
@@ -64,7 +64,7 @@ export function SceneEditorPanel({
   const blankScene = (): SceneItem => ({
     title: '',
     purpose: '',
-    emotionalBeat: '',
+    emotional_beat: '',
     setting: '',
   });
 
@@ -79,11 +79,11 @@ export function SceneEditorPanel({
         const scene: SceneItem = {
           title: typeof so.title === 'string' ? so.title : '',
           purpose: typeof so.purpose === 'string' ? so.purpose : '',
-          emotionalBeat:
-            typeof so.emotionalBeat === 'string'
-              ? so.emotionalBeat
-              : typeof so.emotional_beat === 'string'
-                ? (so.emotional_beat as string)
+          emotional_beat:
+            typeof so.emotional_beat === 'string'
+              ? so.emotional_beat
+              : typeof so.emotionalBeat === 'string'
+                ? (so.emotionalBeat as string)
                 : '',
           setting: typeof so.setting === 'string' ? so.setting : '',
         };
@@ -137,7 +137,7 @@ export function SceneEditorPanel({
 
     setBatchScenes(null);
     setPurpose((content?.purpose as string) || '');
-    setEmotionalBeat((content?.emotionalBeat as string) || '');
+    setEmotionalBeat((content?.emotional_beat as string) || (content?.emotionalBeat as string) || '');
     setSetting((content?.setting as string) || '');
   };
 
@@ -152,11 +152,11 @@ export function SceneEditorPanel({
       updatedContent.scenes = batchScenes;
     } else {
       updatedContent.purpose = purpose;
-      updatedContent.emotionalBeat = emotionalBeat;
+      updatedContent.emotional_beat = emotional_beat;
       updatedContent.setting = setting;
     }
     return updatedContent;
-  }, [baseContent, batchScenes, purpose, emotionalBeat, setting]);
+  }, [baseContent, batchScenes, purpose, emotional_beat, setting]);
 
   const updateSceneMutation = useMutation({
     mutationFn: async (input: { title: string; content: Record<string, unknown> }) => {
@@ -171,6 +171,7 @@ export function SceneEditorPanel({
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['asset', projectId, assetId] });
       queryClient.invalidateQueries({ queryKey: ['project-assets', projectId, 'scene'] });
+      queryClient.invalidateQueries({ queryKey: ['project-assets', projectId, 'shot'] });
       showToast({ type: 'success', title: 'Scene saved', message: 'Saved a new version.' });
     },
     onError: err => {
@@ -378,16 +379,16 @@ export function SceneEditorPanel({
           </div>
 
           <div>
-            <Label htmlFor="scene-item-emotionalBeat">Emotional Beat</Label>
+            <Label htmlFor="scene-item-emotional_beat">Emotional Beat</Label>
             <Input
-              id="scene-item-emotionalBeat"
-              value={selectedScene?.emotionalBeat ?? ''}
+              id="scene-item-emotional_beat"
+              value={selectedScene?.emotional_beat ?? ''}
               onChange={e => {
                 const value = e.target.value;
                 const current = batchScenes && batchScenes.length > 0 ? batchScenes : [];
                 if (current.length === 0) return;
                 const next = current.map((s, i) =>
-                  i === safeBatchIndex ? { ...s, emotionalBeat: value } : s
+                  i === safeBatchIndex ? { ...s, emotional_beat: value } : s
                 );
                 setBatchScenes(next);
               }}
@@ -424,10 +425,10 @@ export function SceneEditorPanel({
             />
           </div>
           <div>
-            <Label htmlFor="scene-emotionalBeat">Emotional Beat</Label>
+            <Label htmlFor="scene-emotional_beat">Emotional Beat</Label>
             <Input
-              id="scene-emotionalBeat"
-              value={emotionalBeat}
+              id="scene-emotional_beat"
+              value={emotional_beat}
               onChange={e => setEmotionalBeat(e.target.value)}
             />
           </div>

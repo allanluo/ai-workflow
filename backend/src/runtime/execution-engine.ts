@@ -5,8 +5,11 @@ import {
   createNodeRun,
   emitWorkflowRunProgress,
   failWorkflowRun,
+  listAssets,
+  getAssetById,
   getWorkflowRunExecutionContext,
   startWorkflowRun,
+  addWorkflowRunLog,
 } from '@ai-workflow/database';
 import { scheduleIndexNodeRun, scheduleIndexWorkflowRun } from '../copilot/vectorIndexScheduler.js';
 import * as adapters from '../services/adapters.js';
@@ -45,7 +48,8 @@ function getNodeId(node: WorkflowNode, position: number): string {
 function buildNodeInputSnapshot(
   node: WorkflowNode,
   resolvedInputSnapshot: Record<string, unknown>,
-  position: number
+  position: number,
+  projectId?: string
 ) {
   const nodeId = getNodeId(node, position);
   const nodeType = getNodeType(node);
@@ -60,6 +64,7 @@ function buildNodeInputSnapshot(
     node_type: nodeType,
     params,
     resolved_input: resolvedInputSnapshot,
+    project_id: projectId,
     _debug_keys: Object.keys(resolvedInputSnapshot),
   };
 }
@@ -139,20 +144,186 @@ async function executeLLMNode(
           const so = s as Record<string, unknown>;
           const title = typeof so.title === 'string' ? so.title : '';
           const purpose = typeof so.purpose === 'string' ? so.purpose : '';
-          const emotionalBeat =
-            typeof so.emotionalBeat === 'string'
-              ? so.emotionalBeat
-              : typeof so.emotional_beat === 'string'
-                ? (so.emotional_beat as string)
+          const emotional_beat =
+            typeof so.emotional_beat === 'string'
+              ? so.emotional_beat
+              : typeof so.emotionalBeat === 'string'
+                ? (so.emotionalBeat as string)
                 : '';
           const setting = typeof so.setting === 'string' ? so.setting : '';
-          return { title, purpose, emotionalBeat, setting };
+          return { title, purpose, emotional_beat, setting };
         })
-        .filter(s => s.title || s.purpose || s.emotionalBeat || s.setting);
+        .filter(s => s.title || s.purpose || s.emotional_beat || s.setting);
 
       if (scenes.length > 0) {
         return { sourceKey: key, scenes };
       }
+    }
+    return null;
+  };
+
+  const extractProductionRequirements = async () => {
+    if (!snapshot.resolved_input || typeof snapshot.resolved_input !== 'object') return null;
+    const resolved = snapshot.resolved_input as Record<string, unknown>;
+    
+    let character_table: any[] = [];
+    let environment_lock = "";
+    let world_rules: any = "";
+    let locations: any[] = [];
+
+    const normalizeName = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
+    const isNonEmptyString = (v: unknown) => typeof v === 'string' && v.trim().length > 0;
+    const dedupeByName = (items: any[]) => {
+      const seen = new Set<string>();
+      const out: any[] = [];
+      for (const it of items) {
+        const name = normalizeName(it?.name).toLowerCase();
+        const key = name || JSON.stringify(it).slice(0, 120);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(it);
+      }
+      return out;
+    };
+
+    const addCharactersFromCanon = (chars: unknown) => {
+      if (!Array.isArray(chars)) return;
+      const mapped = chars
+        .filter(c => c && typeof c === 'object')
+        .map(c => {
+          const o = c as Record<string, unknown>;
+          const appearanceRaw = o.appearance && typeof o.appearance === 'object' && !Array.isArray(o.appearance) ? (o.appearance as Record<string, unknown>) : null;
+          const appearance = appearanceRaw
+            ? {
+                face: isNonEmptyString(appearanceRaw.face) ? String(appearanceRaw.face).trim() : undefined,
+                hair: isNonEmptyString(appearanceRaw.hair) ? String(appearanceRaw.hair).trim() : undefined,
+                clothing: isNonEmptyString(appearanceRaw.clothing) ? String(appearanceRaw.clothing).trim() : undefined,
+                shoes: isNonEmptyString(appearanceRaw.shoes) ? String(appearanceRaw.shoes).trim() : undefined,
+                hat: isNonEmptyString(appearanceRaw.hat) ? String(appearanceRaw.hat).trim() : undefined,
+                accessories: isNonEmptyString(appearanceRaw.accessories) ? String(appearanceRaw.accessories).trim() : undefined,
+              }
+            : undefined;
+
+          return {
+            name: normalizeName(o.name),
+            role: normalizeName(o.role),
+            gender: normalizeName(o.gender || (o as any).sex),
+            age: normalizeName(o.age),
+            description: isNonEmptyString(o.description) ? String(o.description).trim() : '',
+            personality: isNonEmptyString(o.personality) ? String(o.personality).trim() : '',
+            appearance,
+          };
+        })
+        .filter(c => c.name || c.description || (c.appearance && Object.keys(c.appearance).length > 0));
+
+      if (mapped.length) {
+        character_table = dedupeByName([...character_table, ...mapped]);
+      }
+    };
+
+    const isCanonLike = (asset: any) => {
+      const content = asset?.current_version?.content;
+      if (!content || typeof content !== 'object') return false;
+      return Boolean(
+        content.summary ||
+        content.characters ||
+        content.locations ||
+        content.themes ||
+        content.world_rules ||
+        content.environment_lock ||
+        content.character_table
+      );
+    };
+
+    for (const key of Object.keys(resolved)) {
+      const prev = resolved[key];
+      if (!prev || typeof prev !== 'object') continue;
+      const prevObj = prev as Record<string, unknown>;
+      
+      if (Array.isArray(prevObj.character_table)) {
+        character_table = [...character_table, ...prevObj.character_table];
+      }
+      // Canon schema
+      if (Array.isArray(prevObj.characters)) {
+        addCharactersFromCanon(prevObj.characters);
+      }
+      if (isNonEmptyString(prevObj.environment_lock)) {
+        environment_lock = String(prevObj.environment_lock).trim();
+      } else if (isNonEmptyString((prevObj as any).environmentLock)) {
+        environment_lock = String((prevObj as any).environmentLock).trim();
+      }
+      if (Array.isArray(prevObj.world_rules) && prevObj.world_rules.length > 0) {
+        world_rules = prevObj.world_rules;
+      } else if (Array.isArray((prevObj as any).worldRules) && (prevObj as any).worldRules.length > 0) {
+        world_rules = (prevObj as any).worldRules;
+      } else if (isNonEmptyString(prevObj.world_rules)) {
+        world_rules = String(prevObj.world_rules).trim();
+      } else if (isNonEmptyString((prevObj as any).worldRules)) {
+        world_rules = String((prevObj as any).worldRules).trim();
+      }
+      if (Array.isArray(prevObj.locations)) {
+        locations = [...locations, ...prevObj.locations];
+      }
+    }
+
+    if (character_table.length === 0 && !environment_lock && typeof snapshot.project_id === 'string') {
+      console.log(`[Workflow] generate_shot_plan did not receive canon from edges. Fetching latest canon directly from project ${snapshot.project_id}`);
+      const allAssets = await listAssets(snapshot.project_id);
+      const canonAsset = allAssets
+        .filter((a: any) => a.status !== 'deprecated' && (a.asset_type === 'canon_text' || isCanonLike(a)))
+        .sort((a: any, b: any) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())[0];
+      
+      if (canonAsset?.current_version?.content) {
+        const prevObj = canonAsset.current_version.content as Record<string, unknown>;
+        if (Array.isArray(prevObj.character_table)) {
+          character_table = [...character_table, ...prevObj.character_table];
+        }
+        if (Array.isArray(prevObj.characters)) {
+          addCharactersFromCanon(prevObj.characters);
+        }
+        if (isNonEmptyString(prevObj.environment_lock)) {
+          environment_lock = String(prevObj.environment_lock).trim();
+        } else if (isNonEmptyString((prevObj as any).environmentLock)) {
+          environment_lock = String((prevObj as any).environmentLock).trim();
+        }
+        if (Array.isArray(prevObj.world_rules) && prevObj.world_rules.length > 0) {
+          world_rules = prevObj.world_rules;
+        } else if (Array.isArray((prevObj as any).worldRules) && (prevObj as any).worldRules.length > 0) {
+          world_rules = (prevObj as any).worldRules;
+        } else if (isNonEmptyString(prevObj.world_rules)) {
+          world_rules = String(prevObj.world_rules).trim();
+        } else if (isNonEmptyString((prevObj as any).worldRules)) {
+          world_rules = String((prevObj as any).worldRules).trim();
+        }
+        if (Array.isArray(prevObj.locations)) {
+          locations = [...locations, ...prevObj.locations];
+        }
+      }
+    }
+
+    // Mapping character sub-fields to a more unified structure for the shot plan prompt
+    const mappedCharacterTable = character_table.map(c => {
+      const appearance = c.appearance || {};
+      const descriptionPieces = [
+        c.gender,
+        c.age,
+        appearance.face,
+        appearance.hair,
+        appearance.clothing,
+        appearance.shoes,
+        appearance.hat,
+        appearance.accessories
+      ].filter(Boolean);
+
+      return {
+        ...c,
+        character_image: c.character_image || descriptionPieces.join(', ') || c.description || '',
+        appearance,
+      };
+    });
+
+    if (mappedCharacterTable.length > 0 || environment_lock || world_rules || locations.length > 0) {
+      return { character_table: dedupeByName(mappedCharacterTable), environment_lock, world_rules, locations };
     }
     return null;
   };
@@ -180,12 +351,26 @@ async function executeLLMNode(
   }
 
   const providedScenes = nodeType === 'generate_shot_plan' ? extractProvidedScenes() : null;
-  if (nodeType === 'generate_shot_plan' && providedScenes) {
-    const directive = `IMPORTANT: A scene outline was provided in SOURCE CONTENT (from: ${providedScenes.sourceKey}). You MUST output a JSON object with a top-level "scenes" array, and each scene MUST contain a "title" and a "shots" array with multiple shots for that scene. Do NOT output a top-level "shots" array when scenes are provided.`;
+  const requirements = nodeType === 'generate_shot_plan' ? await extractProductionRequirements() : null;
+
+  if (nodeType === 'generate_shot_plan') {
+    const sceneDirective = providedScenes 
+      ? `IMPORTANT: A scene outline was provided. You MUST output a JSON object with a top-level "scenes" array, where each scene includes its own "shots" array. Do NOT output a top-level "shots" array.`
+      : "";
+    
+    const consistencyDirective = requirements
+      ? `STRICT CONSISTENCY RULES:
+- You MUST use the characters from the provided ### PRODUCTION_REQUIREMENTS (MANDATORY) ### section. 
+- Do NOT invent new characters. Do NOT change names or visual descriptions of existing characters.
+- Ensure all shot visual descriptions are consistent with the Environment Lock and World Rules.`
+      : "";
+
     finalPrompt = [
       baseInstructions,
-      directive,
-      `### PROVIDED_SCENES_JSON ###\n${stringifyForContext({ scenes: providedScenes.scenes }, 12000)}`,
+      sceneDirective,
+      consistencyDirective,
+      requirements ? `### PRODUCTION_REQUIREMENTS (MANDATORY) ###\n${stringifyForContext(requirements, 8000)}` : '',
+      providedScenes ? `### PROVIDED_SCENES_JSON ###\n${stringifyForContext({ scenes: providedScenes.scenes }, 12000)}` : '',
       sourceContent ? `### SOURCE CONTENT ###\n${sourceContent}` : '',
     ]
       .filter(Boolean)
@@ -221,12 +406,22 @@ async function executeLLMNode(
 
       if (nodeType === 'generate_shot_plan' && providedScenes) {
         const hasScenes = Array.isArray((parsed as Record<string, unknown>).scenes);
+        const scenesArray = hasScenes ? ((parsed as Record<string, unknown>).scenes as any[]) : [];
         const flatShots = (parsed as Record<string, unknown>).shots;
-        if (!hasScenes && Array.isArray(flatShots)) {
+        const hasFlatShots = Array.isArray(flatShots) && flatShots.length > 0;
+
+        // Recovery: If we have flat shots but either no scenes or empty scenes
+        const scenesAreEmpty = !hasScenes || (scenesArray.length > 0 && scenesArray.every(s => !Array.isArray(s.shots) || s.shots.length === 0));
+
+        if (hasFlatShots && (scenesAreEmpty || !hasScenes)) {
           const shots = flatShots.filter(s => s && typeof s === 'object');
           let cursor = 0;
-          const sceneCount = providedScenes.scenes.length;
-          const scenes = providedScenes.scenes.map((scene, idx) => {
+          
+          // Use provided scenes if the model didn't generate any, or use the ones the model DID generate
+          const baseScenes = scenesArray.length > 0 ? scenesArray : providedScenes.scenes;
+          const sceneCount = baseScenes.length;
+          
+          const consolidatedScenes = baseScenes.map((scene, idx) => {
             const remainingShots = Math.max(0, shots.length - cursor);
             const remainingScenes = Math.max(1, sceneCount - idx);
             const take = Math.ceil(remainingShots / remainingScenes);
@@ -234,7 +429,7 @@ async function executeLLMNode(
             cursor += take;
             return { ...scene, shots: sceneShots };
           });
-          return { scenes, _raw: rawText };
+          return { scenes: consolidatedScenes, _raw: rawText };
         }
       }
 
@@ -248,12 +443,18 @@ async function executeLLMNode(
 
           if (nodeType === 'generate_shot_plan' && providedScenes) {
             const hasScenes = Array.isArray((parsed as Record<string, unknown>).scenes);
+            const scenesArray = hasScenes ? ((parsed as Record<string, unknown>).scenes as any[]) : [];
             const flatShots = (parsed as Record<string, unknown>).shots;
-            if (!hasScenes && Array.isArray(flatShots)) {
+            const hasFlatShots = Array.isArray(flatShots) && flatShots.length > 0;
+
+            const scenesAreEmpty = !hasScenes || (scenesArray.length > 0 && scenesArray.every(s => !Array.isArray(s.shots) || s.shots.length === 0));
+
+            if (hasFlatShots && (scenesAreEmpty || !hasScenes)) {
               const shots = flatShots.filter(s => s && typeof s === 'object');
               let cursor = 0;
-              const sceneCount = providedScenes.scenes.length;
-              const scenes = providedScenes.scenes.map((scene, idx) => {
+              const baseScenes = scenesArray.length > 0 ? scenesArray : providedScenes.scenes;
+              const sceneCount = baseScenes.length;
+              const consolidatedScenes = baseScenes.map((scene, idx) => {
                 const remainingShots = Math.max(0, shots.length - cursor);
                 const remainingScenes = Math.max(1, sceneCount - idx);
                 const take = Math.ceil(remainingShots / remainingScenes);
@@ -261,7 +462,7 @@ async function executeLLMNode(
                 cursor += take;
                 return { ...scene, shots: sceneShots };
               });
-              return { scenes, _raw: rawText };
+              return { scenes: consolidatedScenes, _raw: rawText };
             }
           }
 
@@ -276,12 +477,18 @@ async function executeLLMNode(
 
           if (nodeType === 'generate_shot_plan' && providedScenes) {
             const hasScenes = Array.isArray((parsed as Record<string, unknown>).scenes);
+            const scenesArray = hasScenes ? ((parsed as Record<string, unknown>).scenes as any[]) : [];
             const flatShots = (parsed as Record<string, unknown>).shots;
-            if (!hasScenes && Array.isArray(flatShots)) {
+            const hasFlatShots = Array.isArray(flatShots) && flatShots.length > 0;
+
+            const scenesAreEmpty = !hasScenes || (scenesArray.length > 0 && scenesArray.every(s => !Array.isArray(s.shots) || s.shots.length === 0));
+
+            if (hasFlatShots && (scenesAreEmpty || !hasScenes)) {
               const shots = flatShots.filter(s => s && typeof s === 'object');
               let cursor = 0;
-              const sceneCount = providedScenes.scenes.length;
-              const scenes = providedScenes.scenes.map((scene, idx) => {
+              const baseScenes = scenesArray.length > 0 ? scenesArray : providedScenes.scenes;
+              const sceneCount = baseScenes.length;
+              const consolidatedScenes = baseScenes.map((scene, idx) => {
                 const remainingShots = Math.max(0, shots.length - cursor);
                 const remainingScenes = Math.max(1, sceneCount - idx);
                 const take = Math.ceil(remainingShots / remainingScenes);
@@ -289,7 +496,7 @@ async function executeLLMNode(
                 cursor += take;
                 return { ...scene, shots: sceneShots };
               });
-              return { scenes, _raw: rawText };
+              return { scenes: consolidatedScenes, _raw: rawText };
             }
           }
 
@@ -558,6 +765,118 @@ async function executeNode(
   }
 }
 
+async function resolveBypassedOutput(
+  projectId: string,
+  node: WorkflowNode,
+  workflowId?: string | null
+): Promise<Record<string, unknown> | null> {
+  const nodeType = getNodeType(node);
+  const catalogKey =
+    (node.data as any)?.catalog_type || (node as any)?.catalog_type || (node as any)?.nodeKey;
+
+  console.log(`[Bypass] Resolving output for bypassed node: ${nodeType} (Catalog: ${catalogKey})`);
+
+  const allAssets = listAssets(projectId);
+
+  const isCanonLike = (asset: any) => {
+    const content = asset?.current_version?.content;
+    if (!content || typeof content !== 'object') return false;
+    return Boolean(
+      asset.asset_type === 'canon_text' ||
+      content.summary ||
+      content.characters ||
+      content.locations ||
+      content.themes ||
+      content.world_rules ||
+      content.environment_lock ||
+      content.character_table
+    );
+  };
+
+  const preferSameWorkflow = <T extends { metadata?: any }>(items: T[]) => {
+    if (!workflowId) return items;
+    const same = items.filter(a => (a.metadata as any)?.workflow_id === workflowId);
+    return same.length ? same : items;
+  };
+
+  const isNotEmpty = (content: any) => {
+    if (!content || typeof content !== 'object') return false;
+    // Check for canon-like keys first
+    if (Array.isArray(content.characters) && content.characters.length > 0) return true;
+    if (Array.isArray(content.locations) && content.locations.length > 0) return true;
+    if (typeof content.text === 'string' && content.text.trim().length > 10) return true;
+    if (typeof content.summary === 'string' && content.summary.trim().length > 10) return true;
+    // Fallback: check if it has more than just the basic keys like _raw or metadata
+    const keys = Object.keys(content).filter(k => !k.startsWith('_'));
+    return keys.length > 0;
+  };
+
+  // Strategy 1: Find by exact catalog key match in metadata (best for specific node outputs)
+  const exactCandidates = allAssets.filter(a => (a.metadata as any)?.catalog_key === catalogKey);
+  let match = preferSameWorkflow(exactCandidates.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()))[0];
+
+  // Strategy 2: Find by asset type (fallback for standard nodes)
+  if (!match) {
+    const assetTypeMap: Record<string, string> = {
+      extract_canon: 'canon_text',
+      generate_scenes: 'scene',
+      generate_shot_plan: 'shot_plan',
+      input: 'source_story',
+      story_input: 'source_story',
+    };
+    const targetType = assetTypeMap[nodeType] || assetTypeMap[catalogKey] || catalogKey;
+
+    // For Canon, we want the ABSOLUTE LATEST across the project, because it's the source of truth.
+    // Restricting it to the "same workflow" often leads to stale data drift.
+    if (targetType === 'canon_text' || nodeType === 'extract_canon' || catalogKey === 'extract_canon') {
+      const canonCandidates = allAssets
+        .filter(a => a.status !== 'deprecated' && (a.asset_type === 'canon_text' || isCanonLike(a)))
+        .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+      
+      match = preferSameWorkflow(canonCandidates)[0];
+    } else {
+      const candidates = allAssets.filter(a => a.asset_type === targetType && a.status !== 'deprecated');
+      match = preferSameWorkflow(candidates.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()))[0];
+    }
+  }
+
+  // Strategy 3: Find by asset category (last resort)
+  if (!match) {
+    const assetCategoryMap: Record<string, string> = {
+      extract_canon: 'story',
+      generate_scenes: 'story',
+      generate_shot_plan: 'story',
+    };
+    const targetCategory = assetCategoryMap[nodeType] || assetCategoryMap[catalogKey];
+    if (targetCategory) {
+      match = preferSameWorkflow(
+        allAssets.filter(a => a.asset_category === targetCategory && a.status !== 'deprecated')
+      )[0];
+    }
+  }
+
+  if (match?.current_version?.content && isNotEmpty(match.current_version.content)) {
+    console.log(
+      `[Workflow] [Bypass] Found existing asset for ${getNodeId(node, 0)}: ${match.id} (Type: ${match.asset_type}, Version: ${match.current_version.id})`
+    );
+    return {
+      ...(match.current_version.content as Record<string, unknown>),
+      _debug: {
+        bypass: true,
+        source_asset_id: match.id,
+        source_asset_type: match.asset_type,
+        source_asset_version_id: match.current_version.id,
+        source_updated_at: match.updated_at,
+        source_workflow_id: (match.metadata as any)?.workflow_id ?? null,
+        source_catalog_key: (match.metadata as any)?.catalog_key ?? null,
+      },
+    };
+  }
+
+  console.warn(`[Workflow] [Bypass] No existing asset found for bypassed node: ${catalogKey || nodeType}`);
+  return null;
+}
+
 async function executeWorkflowRun(workflowRunId: string) {
   const context = getWorkflowRunExecutionContext(workflowRunId);
 
@@ -586,14 +905,12 @@ async function executeWorkflowRun(workflowRunId: string) {
       const node = rawNode as WorkflowNode;
       const nodeId = getNodeId(node, index);
       const nodeType = getNodeType(node);
-      const inputSnapshot = buildNodeInputSnapshot(node, context.resolved_input_snapshot, index);
+      const inputSnapshot = buildNodeInputSnapshot(node, context.resolved_input_snapshot, index, context.project_id);
       const progress = Math.round(((index + 1) / context.nodes.length) * 100);
 
       emitWorkflowRunProgress(context.project_id, workflowRunId, progress, nodeId, nodeType);
 
-      console.log(
-        `[Workflow ${workflowRunId}] Executing node ${nodeId} (${index + 1}/${context.nodes.length})`
-      );
+      // Execution loop
 
       const nodeRun = createNodeRun({
         workflow_run_id: workflowRunId,
@@ -610,13 +927,29 @@ async function executeWorkflowRun(workflowRunId: string) {
       }
 
       try {
-        const output = await executeNode(
-          node,
-          inputSnapshot as Record<string, unknown>,
-          nodeRun.id
-        );
+        const isBypassed = (node.params as any)?.bypass === true;
+        const msg = `[Workflow] Node ${nodeId} (${nodeType}). Bypass toggle: ${isBypassed}`;
+        console.log(`[Workflow ${workflowRunId}] ${msg}`);
+        addWorkflowRunLog(workflowRunId, msg);
 
-        completeNodeRun(nodeRun.id, output, 'completed');
+        let output: Record<string, unknown>;
+
+        if (isBypassed) {
+          const bypassedOutput = await resolveBypassedOutput(context.project_id, node, (context as any).workflow_id);
+          if (bypassedOutput) {
+            output = bypassedOutput;
+          } else {
+            throw new Error(`Bypass failed for node ${nodeId}: No existing asset found for this type. Please disable bypass or generate an asset first.`);
+          }
+        } else {
+          output = await executeNode(
+            node,
+            inputSnapshot as Record<string, unknown>,
+            nodeRun.id
+          );
+        }
+
+        completeNodeRun(nodeRun.id, output, isBypassed ? 'skipped' : 'completed');
         scheduleIndexNodeRun(nodeRun.id);
         scheduleIndexWorkflowRun(workflowRunId);
 
@@ -655,13 +988,18 @@ async function executeWorkflowRun(workflowRunId: string) {
           `[Workflow ${workflowRunId}] Node ${nodeId} type=${nodeType} isGenerativeNode=${isGenerativeNode} output result=${output?.result} hasText=${!!output?.text}`
         );
 
-        if (isGenerativeNode && output?.result !== 'error') {
+        if (isGenerativeNode && output?.result !== 'error' && !isBypassed) {
+          const resolvedCatalogKey = (node.data as any)?.catalog_type || (node as any)?.catalog_type || (node as any)?.nodeKey;
+          console.log(`[Workflow ${workflowRunId}] Resolved Catalog Key for ${nodeId}: ${resolvedCatalogKey}`);
+
           const asset = createAssetFromNodeOutput({
             project_id: context.project_id,
             workflow_version_id: context.workflow_version_id,
             workflow_run_id: workflowRunId,
             node_run_id: nodeRun.id,
             node_type: nodeType,
+            catalog_key: resolvedCatalogKey,
+            workflow_id: (context as any).workflow_id,
             output,
           });
 

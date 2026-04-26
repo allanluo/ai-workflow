@@ -6,6 +6,7 @@ import type { ExecutionPlan } from '../lib/agent/planner';
 import type { PlanStepRunState } from '../lib/agent/executor';
 import { executeExecutionPlan } from '../lib/agent/executor';
 import { runCopilotTurn, type CopilotTurnContext } from '../lib/agent/copilotController';
+import { parseIntent } from '../lib/agent/intentParser';
 import type { CopilotMessage } from '../lib/agent/context';
 import { applyProposal } from '../lib/agent/applyProposal';
 import { getTool } from '../lib/agent/tools/registry';
@@ -570,7 +571,10 @@ export const useCopilotSessionStore = create<CopilotSessionState & CopilotSessio
     const pendingShotPromptRequest = get().pendingShotPromptRequest;
     const hasShotFocus = Boolean(context.shotId && context.shotPlanAssetId);
     const isShotClarificationTurn =
-      !pendingPlanRequest && hasShotFocus && Boolean(pendingShotPromptRequest && get().shotQuestions.length > 0);
+      !pendingPlanRequest &&
+      hasShotFocus &&
+      Boolean(pendingShotPromptRequest && get().shotQuestions.length > 0) &&
+      !parseIntent(text);
 
     const lower = text.toLowerCase();
     const applyCommand = lower === 'apply' || lower === 'apply proposal' || lower === 'confirm' || lower === 'yes';
@@ -650,14 +654,26 @@ export const useCopilotSessionStore = create<CopilotSessionState & CopilotSessio
       // Canon compile turns must remain intact (they are an internal marker consumed by the agent).
       const effectiveUserText = isCanonCompile
         ? text
-        : pendingIntentRequest
+        : (pendingIntentRequest && !parseIntent(text))
           ? `${pendingIntentRequest}\n\nINTENT_CONFIRMATION:\n${text}`
-          : pendingPlanRequest
+          : (pendingPlanRequest && !parseIntent(text))
             ? `${pendingPlanRequest}\n\nCLARIFICATIONS:\n${text}`
             : isShotClarificationTurn
               ? `${pendingShotPromptRequest}\n\nSHOT_PROMPT_QUESTIONS:\n${shotQuestionsBlock}\n\nANSWERS:\n${text}`
               : text;
       const output = await runCopilotTurn(context, effectiveUserText, { conversation });
+      if (output.shouldWipeContext) {
+        set({
+          pendingIntentRequest: null,
+          pendingPlanRequest: null,
+          pendingShotPromptRequest: null,
+          activePlan: null,
+          pendingProposal: null,
+          shotProposal: null,
+          shotSuggestion: null,
+          status: 'idle',
+        });
+      }
 
       // Skill-driven navigation
       if (output.skillResult?.success && output.skillResult.action?.type === 'navigate') {

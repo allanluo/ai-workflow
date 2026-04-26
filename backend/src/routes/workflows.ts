@@ -1,4 +1,5 @@
 import {
+  approveWorkflowVersion,
   createWorkflowDefinition,
   createWorkflowVersion,
   createWorkflowRun,
@@ -277,6 +278,50 @@ export async function registerWorkflowRoutes(app: FastifyInstance) {
     };
   });
 
+  app.post('/workflows/:workflowId/runs', async (request, reply) => {
+    const params = z.object({ workflowId: z.string() }).parse(request.params);
+    const body = createWorkflowRunSchema.parse(request.body ?? {});
+    
+    // Auto-create/upsert the single version for this workflow
+    const workflowVersion = createWorkflowVersion(params.workflowId, {});
+    
+    if (!workflowVersion) {
+      reply.code(404);
+      return {
+        ok: false,
+        data: null,
+        error: {
+          code: 'not_found',
+          message: `Workflow ${params.workflowId} was not found`,
+        },
+      };
+    }
+
+    const workflowRun = createWorkflowRun(workflowVersion.id, body);
+
+    if (!workflowRun) {
+      reply.code(500);
+      return {
+        ok: false,
+        data: null,
+        error: {
+          code: 'internal_error',
+          message: `Failed to create run for workflow ${params.workflowId}`,
+        },
+      };
+    }
+
+    startWorkflowRunInBackground(workflowRun.id);
+
+    reply.code(201);
+
+    return {
+      ok: true,
+      data: { workflow_run: workflowRun },
+      error: null,
+    };
+  });
+
   app.post('/workflow-versions/:workflowVersionId/runs', async (request, reply) => {
     const params = z.object({ workflowVersionId: z.string() }).parse(request.params);
     const body = createWorkflowRunSchema.parse(request.body ?? {});
@@ -441,6 +486,29 @@ export async function registerWorkflowRoutes(app: FastifyInstance) {
     return {
       ok: true,
       data: { node_run: { id: newNodeRunId, status: 'queued' } },
+      error: null,
+    };
+  });
+
+  app.post('/workflow-versions/:versionId/approve', async (request, reply) => {
+    const params = z.object({ versionId: z.string() }).parse(request.params);
+    const version = approveWorkflowVersion(params.versionId);
+
+    if (!version) {
+      reply.code(404);
+      return {
+        ok: false,
+        data: null,
+        error: {
+          code: 'not_found',
+          message: `Workflow version ${params.versionId} was not found`,
+        },
+      };
+    }
+
+    return {
+      ok: true,
+      data: { workflow_version: version },
       error: null,
     };
   });

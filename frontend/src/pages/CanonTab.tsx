@@ -13,7 +13,7 @@ import {
   type AssetVersion,
 } from '../lib/api';
 import { Button, Input, Textarea, Select } from '../components/common';
-import { showToast } from '../stores';
+import { showToast, useSelectionStore } from '../stores';
 import type { CanonListItem } from './CanonPage/CanonListPanel';
 
 interface CanonTabProps {
@@ -61,31 +61,38 @@ interface CanonContent {
   summary: string;
   themes: string[];
   tone: string;
-  colorPalette: string[];
-  worldRules: string[];
+  color_palette: string[];
+  world_rules: string[];
   characters: CanonCharacter[];
   locations: CanonLocation[];
   equipment: CanonEquipment[];
   continuity: string[];
+  environment_lock: string;
 }
 
 const emptyCanon: CanonContent = {
   summary: '',
   themes: [],
   tone: '',
-  colorPalette: [],
-  worldRules: [],
+  color_palette: [],
+  world_rules: [],
   characters: [],
   locations: [],
   equipment: [],
   continuity: [],
+  environment_lock: '',
 };
 
 export function CanonTab({ projectId }: CanonTabProps) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
-  const { id: projectIdParam } = useParams();
-  const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
+  const { projectId: projectIdParam } = useParams();
+  const globalSelectedAssetId = useSelectionStore(s => s.selectedAssetId);
+  const [selectedAssetId, setSelectedAssetId] = useState<string | null>(useSelectionStore.getState().selectedAssetId);
+  const selectedWorkflowId = useSelectionStore(s => s.selectedWorkflowId);
+  const selectAsset = useSelectionStore(s => s.selectAsset);
+  const [autoSelectedForWorkflowId, setAutoSelectedForWorkflowId] = useState<string | null>(null);
+
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState<CanonContent>(emptyCanon);
   const [generatingCharacterIndex, setGeneratingCharacterIndex] = useState<number | null>(null);
@@ -95,9 +102,21 @@ export function CanonTab({ projectId }: CanonTabProps) {
     isLoading,
     error,
   } = useQuery({
-    queryKey: ['project-assets', projectId],
-    queryFn: () => fetchProjectAssets(projectId),
+    // Fetch only the asset types this tab cares about to avoid cross-tab cache interference.
+    queryKey: ['canon-tab-assets', projectId],
+    queryFn: async () => {
+      const [canon, shotPlans, generated] = await Promise.all([
+        fetchProjectAssets(projectId, 'canon_text'),
+        fetchProjectAssets(projectId, 'shot_plan'),
+        fetchProjectAssets(projectId, 'generated_text'),
+      ]);
+
+      const byId = new Map<string, Asset>();
+      for (const a of [...canon, ...shotPlans, ...generated]) byId.set(a.id, a);
+      return Array.from(byId.values());
+    },
     enabled: Boolean(projectId),
+    refetchOnMount: 'always',
   });
 
   const { data: workflowRunMap } = useQuery({
@@ -122,10 +141,11 @@ export function CanonTab({ projectId }: CanonTabProps) {
   const createMutation = useMutation({
     mutationFn: createAsset,
     onSuccess: asset => {
-      queryClient.setQueryData<Asset[]>(['project-assets', projectId], prev =>
+      queryClient.setQueryData<Asset[]>(['canon-tab-assets', projectId], prev =>
         prev ? [asset, ...prev] : [asset]
       );
       queryClient.invalidateQueries({ queryKey: ['project-assets', projectId] });
+      queryClient.invalidateQueries({ queryKey: ['canon-tab-assets', projectId] });
       setSelectedAssetId(asset.id);
       setEditContent(emptyCanon);
       setIsEditing(true);
@@ -136,19 +156,37 @@ export function CanonTab({ projectId }: CanonTabProps) {
     mutationFn: ({
       assetId,
       content,
+      assetMetadata,
     }: {
       assetId: string;
       content: CanonContent;
       close?: boolean;
+      assetMetadata?: Record<string, unknown> | null;
     }) =>
-      createAssetVersion(assetId, {
-        content: content as unknown as Record<string, unknown>,
-        source_mode: 'manual',
-        status: 'draft',
-        make_current: true,
-      }),
+      (async () => {
+        // If the user is working within a selected workflow and the canon document has no
+        // workflow tag yet (common for manual docs), attach it so other tabs can filter
+        // consistently.
+        const existingWorkflowId = (assetMetadata as any)?.workflow_id;
+        if (selectedWorkflowId && assetMetadata && !existingWorkflowId) {
+          await updateAsset(assetId, {
+            metadata: {
+              ...assetMetadata,
+              workflow_id: selectedWorkflowId,
+            },
+          });
+        }
+
+        return createAssetVersion(assetId, {
+          content: content as unknown as Record<string, unknown>,
+          source_mode: 'manual',
+          status: 'draft',
+          make_current: true,
+        });
+      })(),
     onSuccess: (_assetVersion: AssetVersion, variables) => {
       queryClient.invalidateQueries({ queryKey: ['project-assets', projectId] });
+      queryClient.invalidateQueries({ queryKey: ['canon-tab-assets', projectId] });
       if (variables.close !== false) {
         setIsEditing(false);
       }
@@ -173,6 +211,7 @@ export function CanonTab({ projectId }: CanonTabProps) {
         (prev ?? []).map(a => (a.id === assetId ? { ...a, status: 'deprecated' } : a))
       );
       queryClient.invalidateQueries({ queryKey: ['project-assets', projectId] });
+      queryClient.invalidateQueries({ queryKey: ['canon-tab-assets', projectId] });
       setSelectedAssetId(prev => (prev === assetId ? null : prev));
       setIsEditing(false);
       setEditContent(emptyCanon);
@@ -191,20 +230,118 @@ export function CanonTab({ projectId }: CanonTabProps) {
     mutationFn: generateCharacterImage,
   });
 
-  const canonAssets = useMemo(
-    () => (allAssets ?? []).filter(a => a.asset_type === 'canon_text' && a.status !== 'deprecated'),
-    [allAssets]
-  );
-  const sortedCanonAssets = useMemo(
-    () => [...canonAssets].sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()),
-    [canonAssets]
-  );
+  const { canonAssets, canonTotalCount, canonWorkflowMatchCount } = useMemo(() => {
+    const raw = allAssets ?? [];
+    const typeFiltered = raw.filter(a => {
+      const isExplicitCanon = a.asset_type === 'canon_text';
+      // Fallback for miscategorized assets that have canon data
+      const cv = (a.current_version?.content ?? {}) as any;
+      const isCanonLike =
+        a.asset_type === 'generated_text' &&
+        Boolean(
+          cv?.summary ||
+            cv?.characters ||
+            cv?.locations ||
+            cv?.themes ||
+            cv?.tone ||
+            cv?.world_rules ||
+            cv?.environment_lock ||
+            cv?.character_table ||
+            (typeof cv?.text === 'string' &&
+              /\b(canon|characters?|locations?|themes?|tone|environment_lock|world\s*rules?)\b/i.test(
+                cv.text
+              ))
+        );
+      return (isExplicitCanon || isCanonLike) && a.status !== 'deprecated';
+    });
+
+    if (!selectedWorkflowId) {
+      return {
+        canonAssets: typeFiltered,
+        canonTotalCount: typeFiltered.length,
+        canonWorkflowMatchCount: typeFiltered.length,
+      };
+    }
+
+    const matches = typeFiltered.filter(a => {
+      const meta = a.metadata as Record<string, unknown> | null;
+      return meta?.workflow_id === selectedWorkflowId;
+    });
+
+    const filtered = typeFiltered.filter(a => {
+      const meta = a.metadata as Record<string, unknown> | null;
+      return !meta?.workflow_id || meta?.workflow_id === selectedWorkflowId;
+    });
+
+    return {
+      canonAssets: filtered,
+      canonTotalCount: typeFiltered.length,
+      canonWorkflowMatchCount: matches.length,
+    };
+  }, [allAssets, selectedWorkflowId]);
+
+  const isMissingWorkflowCanon =
+    Boolean(selectedWorkflowId) && canonTotalCount > 0 && canonWorkflowMatchCount === 0;
+  const sortedCanonAssets = useMemo(() => {
+    const list = [...canonAssets];
+    if (selectedWorkflowId) {
+      list.sort((a, b) => {
+        const aMeta = a.metadata as Record<string, unknown> | null;
+        const bMeta = b.metadata as Record<string, unknown> | null;
+        const aMatches = aMeta?.workflow_id === selectedWorkflowId;
+        const bMatches = bMeta?.workflow_id === selectedWorkflowId;
+
+        if (aMatches && !bMatches) return -1;
+        if (!aMatches && bMatches) return 1;
+
+        return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
+      });
+    } else {
+      list.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+    }
+    return list;
+  }, [canonAssets, selectedWorkflowId]);
 
   useEffect(() => {
-    if (!selectedAssetId && sortedCanonAssets.length > 0) {
-      setSelectedAssetId(sortedCanonAssets[0].id);
+    if (sortedCanonAssets.length === 0) return;
+
+    const topAssetId = sortedCanonAssets[0].id;
+    const topAsset = sortedCanonAssets[0];
+    const topAssetMatches = (topAsset?.metadata as Record<string, unknown> | undefined)?.workflow_id === selectedWorkflowId;
+
+    // SCENARIO 1: First time selection
+    if (!selectedAssetId) {
+      setSelectedAssetId(topAssetId);
+      selectAsset(topAssetId);
+      if (topAssetMatches) setAutoSelectedForWorkflowId(selectedWorkflowId);
+      return;
     }
-  }, [selectedAssetId, sortedCanonAssets]);
+
+    // SCENARIO 2: Workflow changed, OR a NEW run finished for the SAME workflow
+    // (We auto-jump ONLY if the previous selection was also auto-selected for this workflow,
+    // which prevents jumping away if the user manually clicked an old result)
+    const canAutoJump = selectedWorkflowId === autoSelectedForWorkflowId;
+    if (selectedWorkflowId && topAssetMatches && selectedAssetId !== topAssetId && canAutoJump) {
+      setSelectedAssetId(topAssetId);
+      selectAsset(topAssetId);
+      setAutoSelectedForWorkflowId(selectedWorkflowId);
+      return;
+    }
+
+    // SCENARIO 3: Workflow changed to one that doesn't have an auto-selection yet
+    if (selectedWorkflowId && selectedWorkflowId !== autoSelectedForWorkflowId && topAssetMatches) {
+        setSelectedAssetId(topAssetId);
+        selectAsset(topAssetId);
+        setAutoSelectedForWorkflowId(selectedWorkflowId);
+        return;
+    }
+
+    // SCENARIO 4: Cleanup if asset is gone
+    if (!sortedCanonAssets.some(a => a.id === selectedAssetId)) {
+      setSelectedAssetId(topAssetId);
+      selectAsset(topAssetId);
+    }
+  }, [sortedCanonAssets, selectedAssetId, selectedWorkflowId, autoSelectedForWorkflowId]);
 
   const workflowRunIds = [
     ...new Set(canonAssets.map(a => a.current_version?.workflow_run_id).filter(Boolean)),
@@ -218,7 +355,7 @@ export function CanonTab({ projectId }: CanonTabProps) {
       asset_category: 'story',
       title: 'New Canon Document',
       content: emptyCanon as unknown as Record<string, unknown>,
-      metadata: {},
+      metadata: selectedWorkflowId ? { workflow_id: selectedWorkflowId } : {},
       source_mode: 'manual',
     });
   };
@@ -276,6 +413,7 @@ export function CanonTab({ projectId }: CanonTabProps) {
 
   const handleSelectAssetId = (assetId: string) => {
     setSelectedAssetId(assetId);
+    selectAsset(assetId);
     setIsEditing(false);
   };
 
@@ -287,7 +425,12 @@ export function CanonTab({ projectId }: CanonTabProps) {
 
   const handleSave = () => {
     if (selectedAsset) {
-      updateMutation.mutate({ assetId: selectedAsset.id, content: editContent, close: true });
+      updateMutation.mutate({
+        assetId: selectedAsset.id,
+        content: editContent,
+        close: true,
+        assetMetadata: selectedAsset.metadata ?? {},
+      });
     }
   };
 
@@ -422,7 +565,7 @@ export function CanonTab({ projectId }: CanonTabProps) {
       char.description ? `Description: ${char.description}.` : null,
       canon.tone ? `Tone: ${canon.tone}.` : null,
       canon.themes?.length ? `Themes: ${canon.themes.slice(0, 4).join(', ')}.` : null,
-      canon.worldRules?.length ? `World notes: ${canon.worldRules.slice(0, 3).join(' ')}` : null,
+      canon.world_rules?.length ? `World notes: ${canon.world_rules.slice(0, 3).join(' ')}` : null,
     ]
       .filter(Boolean)
       .join(' ');
@@ -471,6 +614,7 @@ export function CanonTab({ projectId }: CanonTabProps) {
       const result = await generateImageMutation.mutateAsync({
         projectId,
         prompt,
+        negativePrompt: 'blurry, low quality, distorted, watermark, text, logos, worst quality, lowres, jpeg artifacts',
         width: 768,
         height: 768,
       });
@@ -553,42 +697,42 @@ export function CanonTab({ projectId }: CanonTabProps) {
   const addWorldRule = () => {
     setEditContent(prev => ({
       ...prev,
-      worldRules: [...prev.worldRules, ''],
+      world_rules: [...prev.world_rules, ''],
     }));
   };
 
   const updateWorldRule = (index: number, value: string) => {
     setEditContent(prev => ({
       ...prev,
-      worldRules: prev.worldRules.map((r, i) => (i === index ? value : r)),
+      world_rules: prev.world_rules.map((r, i) => (i === index ? value : r)),
     }));
   };
 
   const removeWorldRule = (index: number) => {
     setEditContent(prev => ({
       ...prev,
-      worldRules: prev.worldRules.filter((_, i) => i !== index),
+      world_rules: prev.world_rules.filter((_, i) => i !== index),
     }));
   };
 
   const addColor = () => {
     setEditContent(prev => ({
       ...prev,
-      colorPalette: [...(prev.colorPalette ?? []), ''],
+      color_palette: [...(prev.color_palette ?? []), ''],
     }));
   };
 
   const updateColor = (index: number, value: string) => {
     setEditContent(prev => ({
       ...prev,
-      colorPalette: (prev.colorPalette ?? []).map((c, i) => (i === index ? value : c)),
+      color_palette: (prev.color_palette ?? []).map((c, i) => (i === index ? value : c)),
     }));
   };
 
   const removeColor = (index: number) => {
     setEditContent(prev => ({
       ...prev,
-      colorPalette: (prev.colorPalette ?? []).filter((_, i) => i !== index),
+      color_palette: (prev.color_palette ?? []).filter((_, i) => i !== index),
     }));
   };
 
@@ -640,6 +784,7 @@ export function CanonTab({ projectId }: CanonTabProps) {
 
     const summary = typeof obj.summary === 'string' ? obj.summary : '';
     const tone = typeof obj.tone === 'string' ? obj.tone : '';
+    const environment_lock = typeof obj.environment_lock === 'string' ? obj.environment_lock : '';
 
     const themes = Array.isArray(obj.themes)
       ? obj.themes.filter((t): t is string => typeof t === 'string').map(t => t.trim()).filter(Boolean)
@@ -650,24 +795,24 @@ export function CanonTab({ projectId }: CanonTabProps) {
             .filter(Boolean)
         : [];
 
-    const colorPaletteRaw = (obj.colorPalette ?? obj.color_palette) as unknown;
-    const colorPalette = Array.isArray(colorPaletteRaw)
-      ? colorPaletteRaw.filter((c): c is string => typeof c === 'string').map(c => c.trim()).filter(Boolean)
-      : typeof colorPaletteRaw === 'string'
-        ? colorPaletteRaw
+    const color_palette_raw = (obj.color_palette ?? (obj as any).colorPalette) as unknown;
+    const color_palette = Array.isArray(color_palette_raw)
+      ? color_palette_raw.filter((c): c is string => typeof c === 'string').map(c => c.trim()).filter(Boolean)
+      : typeof color_palette_raw === 'string'
+        ? color_palette_raw
             .split(/[,;]/)
             .map(c => c.trim())
             .filter(Boolean)
         : [];
 
-    const worldRulesRaw = (obj.worldRules ?? obj.world_rules) as unknown;
-    const worldRules = Array.isArray(worldRulesRaw)
-      ? worldRulesRaw.filter((r): r is string => typeof r === 'string').map(r => r.trim()).filter(Boolean)
-      : typeof worldRulesRaw === 'string'
-        ? [worldRulesRaw].map(r => r.trim()).filter(Boolean)
+    const world_rules_raw = (obj.world_rules ?? (obj as any).worldRules) as unknown;
+    const world_rules = Array.isArray(world_rules_raw)
+      ? world_rules_raw.filter((r): r is string => typeof r === 'string').map(r => r.trim()).filter(Boolean)
+      : typeof world_rules_raw === 'string'
+        ? [world_rules_raw].map(r => r.trim()).filter(Boolean)
         : [];
 
-    const continuityRaw = (obj.continuity ?? obj.continuity_constraints ?? obj.continuityConstraints) as unknown;
+    const continuityRaw = (obj.continuity ?? obj.continuity_constraints ?? (obj as any).continuityConstraints) as unknown;
     const continuity = Array.isArray(continuityRaw)
       ? continuityRaw.filter((r): r is string => typeof r === 'string').map(r => r.trim()).filter(Boolean)
       : typeof continuityRaw === 'string'
@@ -768,8 +913,8 @@ export function CanonTab({ projectId }: CanonTabProps) {
     normalized.summary = summary;
     normalized.themes = themes;
     normalized.tone = tone;
-    normalized.colorPalette = colorPalette;
-    normalized.worldRules = worldRules;
+    normalized.color_palette = color_palette;
+    normalized.world_rules = world_rules;
     normalized.characters = characters;
     normalized.locations = locations;
     normalized.equipment = equipment;
@@ -790,10 +935,10 @@ export function CanonTab({ projectId }: CanonTabProps) {
         obj.locations ||
         obj.themes ||
         obj.tone ||
-        obj.worldRules ||
         obj.world_rules ||
-        obj.colorPalette ||
+        (obj as any).worldRules ||
         obj.color_palette ||
+        (obj as any).colorPalette ||
         obj.equipment
       ) {
         return normalizeCanonContent(obj);
@@ -808,18 +953,19 @@ export function CanonTab({ projectId }: CanonTabProps) {
     ) {
       const text = rawContent.text;
 
-      const result: CanonContent = {
-        _raw: text,
-        summary: '',
-        characters: [],
-        locations: [],
-        themes: [],
-        tone: '',
-        colorPalette: [],
-        worldRules: [],
-        equipment: [],
-        continuity: [],
-      };
+	      const result: CanonContent = {
+	        _raw: text,
+	        summary: '',
+	        characters: [],
+	        locations: [],
+	        themes: [],
+	        tone: '',
+	        color_palette: [],
+	        world_rules: [],
+	        equipment: [],
+	        continuity: [],
+          environment_lock: '',
+	      };
 
       // Summary - look for **Summary:** or **1. Summary:** or Summary:
       const summaryMatch = text.match(
@@ -888,7 +1034,7 @@ export function CanonTab({ projectId }: CanonTabProps) {
         for (const match of ruleMatches) {
           const rule = match[1].replace(/\*\*/g, '').trim();
           if (rule && rule.length < 200) {
-            result.worldRules.push(rule);
+            result.world_rules.push(rule);
           }
         }
       }
@@ -898,7 +1044,7 @@ export function CanonTab({ projectId }: CanonTabProps) {
         result.characters.length > 0 ||
         result.themes.length > 0 ||
         result.tone ||
-        result.worldRules.length > 0
+        result.world_rules.length > 0
       ) {
         return normalizeCanonContent(result);
       }
@@ -940,8 +1086,8 @@ export function CanonTab({ projectId }: CanonTabProps) {
       normalized.locations.length > 0 ||
       normalized.themes.length > 0 ||
       Boolean(normalized.tone) ||
-      normalized.colorPalette.length > 0 ||
-      normalized.worldRules.length > 0 ||
+      normalized.color_palette.length > 0 ||
+      normalized.world_rules.length > 0 ||
       normalized.equipment.length > 0 ||
       normalized.continuity.length > 0;
 
@@ -951,6 +1097,14 @@ export function CanonTab({ projectId }: CanonTabProps) {
           <div>
             <h4 className="text-xs font-medium text-[var(--text-muted)] uppercase mb-2">Summary</h4>
             <p className="text-sm text-[var(--text-primary)]">{normalized.summary}</p>
+          </div>
+        )}
+        {normalized.environment_lock && (
+          <div>
+            <h4 className="text-xs font-medium text-[var(--accent)] uppercase mb-2">Environment Lock</h4>
+            <div className="p-3 bg-[var(--bg-hover)] border-l-2 border-[var(--accent)] rounded-r-lg">
+              <p className="text-sm font-medium text-[var(--text-primary)]">{normalized.environment_lock}</p>
+            </div>
           </div>
         )}
         {normalized.characters.length > 0 && (
@@ -1063,13 +1217,13 @@ export function CanonTab({ projectId }: CanonTabProps) {
             </div>
           </div>
         )}
-        {normalized.colorPalette.length > 0 && (
+        {normalized.color_palette.length > 0 && (
           <div>
             <h4 className="text-xs font-medium text-[var(--text-muted)] uppercase mb-2">
               Color Palette
             </h4>
             <div className="flex flex-wrap gap-2">
-              {normalized.colorPalette.map((color, i) => (
+              {normalized.color_palette.map((color, i) => (
                 <span
                   key={i}
                   className="px-3 py-1 text-sm bg-[var(--bg-input)] text-[var(--text-secondary)] rounded-full border border-[var(--border)]"
@@ -1086,13 +1240,13 @@ export function CanonTab({ projectId }: CanonTabProps) {
             <p className="text-sm text-[var(--text-primary)]">{normalized.tone}</p>
           </div>
         )}
-        {normalized.worldRules.length > 0 && (
+        {normalized.world_rules.length > 0 && (
           <div>
             <h4 className="text-xs font-medium text-[var(--text-muted)] uppercase mb-2">
               World Rules
             </h4>
             <ul className="space-y-1">
-              {normalized.worldRules.map((rule, i) => (
+              {normalized.world_rules.map((rule, i) => (
                 <li key={i} className="flex items-start gap-2 text-sm text-[var(--text-primary)]">
                   <span className="w-1.5 h-1.5 rounded-full bg-[var(--warning)] mt-1.5 flex-shrink-0" />
                   {rule}
@@ -1169,6 +1323,14 @@ export function CanonTab({ projectId }: CanonTabProps) {
         onChange={e => setEditContent(prev => ({ ...prev, tone: e.target.value }))}
         placeholder="e.g., Dark, Whimsical"
       />
+      <Textarea
+        id="canon-env-lock"
+        label="Environment Lock / Visual Style (Overrides individual locations)"
+        value={editContent.environment_lock}
+        onChange={e => setEditContent(prev => ({ ...prev, environment_lock: e.target.value }))}
+        placeholder="e.g., An African grassland with scattered big trees and golden hour lighting..."
+        rows={2}
+      />
       <div>
         <div className="flex items-center justify-between mb-2">
           <label className="text-xs font-medium text-[var(--text-muted)] uppercase">
@@ -1183,7 +1345,7 @@ export function CanonTab({ projectId }: CanonTabProps) {
           </button>
         </div>
         <div className="flex flex-wrap gap-2">
-          {editContent.colorPalette.map((color, i) => (
+          {editContent.color_palette.map((color, i) => (
             <div key={i} className="flex items-center gap-1">
               <div className="w-44">
                 <Input
@@ -1501,7 +1663,7 @@ export function CanonTab({ projectId }: CanonTabProps) {
           </button>
         </div>
         <div className="space-y-2">
-          {editContent.worldRules.map((rule, i) => (
+          {editContent.world_rules.map((rule, i) => (
             <div key={i} className="flex gap-2 items-end">
               <div className="flex-1">
                 <Input
@@ -1704,7 +1866,13 @@ export function CanonTab({ projectId }: CanonTabProps) {
 	            )}
 	          </div>
 	        </div>
-
+          {isMissingWorkflowCanon && (
+            <div className="mt-2 text-xs text-amber-400">
+              No canon documents are tagged to the selected workflow yet — showing all canon
+              documents.
+            </div>
+          )}
+            
       </div>
 
       <div className="flex-1 overflow-auto p-4">

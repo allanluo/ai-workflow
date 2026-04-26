@@ -1,4 +1,5 @@
 import type { CopilotContext } from './types';
+import { isCanonLike } from './buildContext';
 
 function safeTitle(item: { title?: unknown; id?: unknown }) {
   const t = typeof item.title === 'string' ? item.title.trim() : '';
@@ -51,7 +52,7 @@ export function formatCopilotContext(ctx: CopilotContext) {
   // Lightweight “RAG payload”: include a few clipped contents so the planner/chat can reason semantically.
   lines.push('ASSET_SNIPPETS:');
   const snippetAssets = ctx.retrieval.assets
-    .filter(a => ['canon_text', 'scene', 'shot_plan'].includes(String((a as any).asset_type ?? '')))
+    .filter(a => isCanonLike(a) || ['scene', 'shot_plan'].includes(String((a as any).asset_type ?? '')))
     .slice(0, 3);
   if (snippetAssets.length === 0) {
     lines.push('  (none)');

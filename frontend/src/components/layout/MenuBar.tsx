@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Dropdown, Button, Input, ProjectPickerModal } from '../common';
-import { useAppStore, usePanelStore } from '../../stores';
+import { useAppStore, usePanelStore, useSelectionStore } from '../../stores';
 import type { Project } from '../../lib/api';
 
 interface MenuItem {
@@ -64,7 +64,7 @@ export function MenuBar() {
         },
         { id: 'import', label: 'Import Source', shortcut: 'Ctrl+I', onClick: () => {} },
         { id: 'sep1', label: '', separator: true },
-        { id: 'export', label: 'Export...', shortcut: 'Ctrl+E', onClick: () => {} },
+        { id: 'export', label: 'Export...', shortcut: 'Ctrl+E', onClick: () => useSelectionStore.getState().triggerExport() },
         { id: 'sep2', label: '', separator: true },
         { id: 'close', label: 'Close Project', onClick: () => {} },
         { id: 'quit', label: 'Quit', shortcut: 'Ctrl+Q', onClick: () => {} },

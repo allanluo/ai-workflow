@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type DragEvent, type ReactNode } from 'rea
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   createWorkflow,
-  createWorkflowRun,
+  createWorkflowRunDirect,
   createWorkflowVersion,
   deleteWorkflow,
   fetchNodeRuns,
@@ -28,6 +28,7 @@ import {
 } from '../lib/workflowCatalog';
 import { useProjectEvents, useWorkflowProgress } from '../lib/useProjectEvents';
 import { showToast, useSelectionStore, usePanelStore } from '../stores';
+import { WorkflowVersionsPanel } from './WorkflowsPage/WorkflowVersionsPanel';
 
 interface WorkflowsTabProps {
   projectId: string;
@@ -66,6 +67,101 @@ const categoryGlyphs: Record<WorkflowNodeCategory, string> = {
   export: 'E',
 };
 
+function workflowDocumentSelectLabel(wf: WorkflowDefinition) {
+  const nodeCount = Array.isArray(wf.nodes) ? wf.nodes.length : 0;
+  const dateStr = wf.updated_at ? new Date(wf.updated_at).toLocaleDateString() : '';
+  return `${wf.title} · ${nodeCount} nodes · ${wf.mode} · ${dateStr}`;
+}
+
+function WorkflowDocumentPicker({
+  workflows,
+  isLoading,
+  isError,
+  allowEmptySelection,
+  selectedWorkflowId,
+  onSelectWorkflowId,
+  onAddDefault,
+  onDeleteSelected,
+  addPending,
+  deletePending,
+  className = 'p-4 border-b border-comfy-border',
+  showDelete = true,
+}: {
+  workflows: WorkflowDefinition[] | undefined;
+  isLoading: boolean;
+  isError: boolean;
+  allowEmptySelection: boolean;
+  selectedWorkflowId: string | null;
+  onSelectWorkflowId: (id: string | null) => void;
+  onAddDefault: () => void;
+  onDeleteSelected?: () => void;
+  addPending: boolean;
+  deletePending: boolean;
+  className?: string;
+  showDelete?: boolean;
+}) {
+  const list = workflows ?? [];
+  const hasRows = list.length > 0;
+  const selectDisabled = isLoading || isError || !hasRows;
+  const selectValue =
+    allowEmptySelection && !selectedWorkflowId
+      ? ''
+      : (selectedWorkflowId ?? list[0]?.id ?? '');
+
+  return (
+    <div className={className}>
+      <div className="flex items-end gap-2">
+        <div className="flex-1 min-w-0">
+          <div className="text-[11px] text-comfy-muted mb-2">Workflow document</div>
+          <select
+            className="comfy-input w-full text-xs"
+            disabled={selectDisabled}
+            value={hasRows ? selectValue : ''}
+            onChange={e => {
+              const v = e.target.value;
+              onSelectWorkflowId(v ? v : null);
+            }}
+          >
+            {allowEmptySelection && hasRows && <option value="">Select a workflow…</option>}
+            {!hasRows ? (
+              <option value="">{isLoading ? 'Loading…' : 'No workflows yet'}</option>
+            ) : (
+              list.map(wf => (
+                <option key={wf.id} value={wf.id}>
+                  {workflowDocumentSelectLabel(wf)}
+                </option>
+              ))
+            )}
+          </select>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={onAddDefault}
+            disabled={addPending}
+            className="comfy-btn text-xs disabled:opacity-50"
+          >
+            + Add
+          </button>
+          {showDelete && onDeleteSelected ? (
+            <button
+              type="button"
+              onClick={onDeleteSelected}
+              disabled={!selectedWorkflowId || deletePending}
+              className="comfy-btn-danger text-xs disabled:opacity-50"
+            >
+              Delete
+            </button>
+          ) : null}
+        </div>
+      </div>
+      {isError ? (
+        <p className="mt-2 text-xs text-rose-600">Could not load workflows.</p>
+      ) : null}
+    </div>
+  );
+}
+
 export function WorkflowsTab({ projectId }: WorkflowsTabProps) {
   const queryClient = useQueryClient();
   const selectedWorkflowId = useSelectionStore(s => s.selectedWorkflowId);
@@ -74,9 +170,9 @@ export function WorkflowsTab({ projectId }: WorkflowsTabProps) {
   const clearWorkflowSelection = useSelectionStore(s => s.clearWorkflowSelection);
   const { setRightPanelTab, setRightPanelOpen } = usePanelStore();
   const [selectedRun, setSelectedRun] = useState<string | null>(null);
+  const [viewingVersionId, setViewingVersionId] = useState<string | null>(null);
   const { draft, setDraft } = useDraftStore();
   const [draftError, setDraftError] = useState<string | null>(null);
-  const [freezeNotes, setFreezeNotes] = useState('');
   const [lastValidation, setLastValidation] = useState<WorkflowValidation | null>(null);
   const [pendingConnectionSource, setPendingConnectionSource] = useState<string | null>(null);
   const [isNodeLibraryOpen, setIsNodeLibraryOpen] = useState(false);
@@ -87,6 +183,7 @@ export function WorkflowsTab({ projectId }: WorkflowsTabProps) {
     onEvent: () => {
       queryClient.invalidateQueries({ queryKey: ['project-runs', projectId] });
       queryClient.invalidateQueries({ queryKey: ['project-workflows', projectId] });
+      queryClient.invalidateQueries({ queryKey: ['project-assets', projectId] });
     },
   });
 
@@ -118,7 +215,7 @@ export function WorkflowsTab({ projectId }: WorkflowsTabProps) {
         sessionStorage.removeItem('pendingWorkflowId');
       }
     }
-  }, [workflowsQuery.data, selectedWorkflowId]);
+  }, [workflowsQuery.data, selectedWorkflowId, selectWorkflow]);
 
   const runsQuery = useQuery({
     queryKey: ['project-runs', projectId],
@@ -130,11 +227,11 @@ export function WorkflowsTab({ projectId }: WorkflowsTabProps) {
     if (workflowQuery.data) {
       setDraft(toDraftState(workflowQuery.data));
       setDraftError(null);
-      setFreezeNotes('');
       setLastValidation(null);
       setPendingConnectionSource(null);
       setIsNodeLibraryOpen(false);
       setActiveLibraryCategory('input');
+      setViewingVersionId(null);
     }
   }, [workflowQuery.data]);
 
@@ -199,31 +296,8 @@ export function WorkflowsTab({ projectId }: WorkflowsTabProps) {
     },
   });
 
-  const createVersionMutation = useMutation({
-    mutationFn: createWorkflowVersion,
-    onSuccess: version => {
-      queryClient.invalidateQueries({
-        queryKey: ['workflow-versions', version.workflow_definition_id],
-      });
-      queryClient.invalidateQueries({ queryKey: ['project-workflows', projectId] });
-      setFreezeNotes('');
-      showToast({
-        type: 'success',
-        title: 'Version frozen',
-        message: `Created v${version.version_number}`,
-      });
-    },
-    onError: error => {
-      showToast({
-        type: 'error',
-        title: 'Freeze failed',
-        message: error instanceof Error ? error.message : 'Unable to freeze workflow version',
-      });
-    },
-  });
-
   const createRunMutation = useMutation({
-    mutationFn: createWorkflowRun,
+    mutationFn: createWorkflowRunDirect,
     onSuccess: run => {
       queryClient.invalidateQueries({ queryKey: ['project-runs', projectId] });
       setSelectedRun(run.id);
@@ -317,51 +391,18 @@ export function WorkflowsTab({ projectId }: WorkflowsTabProps) {
     await validateWorkflowMutation.mutateAsync(workflow.id);
   }
 
-  async function handleFreezeVersion() {
-    if (!selectedWorkflowId) {
-      return;
-    }
 
-    const workflow = hasDraft ? await persistDraft() : workflowQuery.data;
-
-    if (!workflow) {
-      return;
-    }
-
-    await createVersionMutation.mutateAsync({
-      workflowId: workflow.id,
-      notes: freezeNotes.trim() || 'Draft frozen from workflow editor',
-    });
-  }
-
-  async function handleRunLatestVersion() {
+  async function handleRunWorkflow() {
     if (!selectedWorkflowId) {
       return;
     }
 
     if (hasDraft) {
-      showToast({
-        type: 'warning',
-        title: 'Unsaved changes',
-        message: 'Save and freeze the draft before starting a run.',
-      });
-      return;
-    }
-
-    const versions = await fetchWorkflowVersions(selectedWorkflowId);
-    const latestVersion = versions[0];
-
-    if (!latestVersion) {
-      showToast({
-        type: 'warning',
-        title: 'No frozen version',
-        message: 'Freeze a workflow version before running it.',
-      });
-      return;
+      await persistDraft();
     }
 
     await createRunMutation.mutateAsync({
-      workflowVersionId: latestVersion.id,
+      workflowId: selectedWorkflowId,
       trigger_source: 'manual',
     });
   }
@@ -468,46 +509,55 @@ export function WorkflowsTab({ projectId }: WorkflowsTabProps) {
   return (
     <div className="h-full">
       {!selectedWorkflowId ? (
-        <div
-          className="relative w-full h-full"
-          style={{
-            backgroundImage: `
+        <div className="flex h-full min-h-0 flex-col comfy-bg-primary">
+          <div className="flex shrink-0 items-center justify-between gap-3 p-4">
+            <div className="min-w-0">
+              <div className="truncate text-sm font-semibold text-comfy-text">Workflows</div>
+            </div>
+          </div>
+          <WorkflowDocumentPicker
+            workflows={workflowsQuery.data}
+            isLoading={workflowsQuery.isLoading}
+            isError={workflowsQuery.isError}
+            allowEmptySelection
+            selectedWorkflowId={selectedWorkflowId}
+            onSelectWorkflowId={id => (id ? selectWorkflow(id) : clearWorkflowSelection())}
+            onAddDefault={() => handleCreateWorkflowFromTemplate('storyboard_from_story')}
+            addPending={createWorkflowMutation.isPending}
+            deletePending={deleteWorkflowMutation.isPending}
+            showDelete={false}
+          />
+          <div
+            className="relative min-h-0 flex-1"
+            style={{
+              backgroundImage: `
             linear-gradient(to right, var(--border-light) 1px, transparent 1px),
             linear-gradient(to bottom, var(--border-light) 1px, transparent 1px)
           `,
-            backgroundSize: '20px 20px',
-          }}
-        >
-          <div className="absolute inset-0 flex items-center justify-center">
-            <div className="text-center bg-[var(--bg-elevated)] p-8 rounded-lg border border-[var(--border-light)] shadow-lg max-w-md">
-              <p className="text-lg text-[var(--text-primary)] font-medium mb-4">
-                Create a Workflow
-              </p>
-              <p className="text-sm text-[var(--text-muted)] mb-6">
-                Choose a template to get started
-              </p>
-              <div className="grid grid-cols-1 gap-3">
-                {workflowTemplateCatalog.map(template => (
-                  <button
-                    key={template.id}
-                    onClick={() => handleCreateWorkflowFromTemplate(template.id)}
-                    className="p-4 text-left rounded-lg border border-[var(--border)] hover:border-[var(--accent)] hover:bg-[var(--accent)]/5 transition-colors"
-                  >
-                    <div className="text-sm font-medium text-[var(--text-primary)]">
-                      {template.title}
-                    </div>
-                    <div className="text-xs text-[var(--text-muted)] mt-1">
-                      {template.description}
-                    </div>
-                    <div className="text-xs text-[var(--text-muted)] mt-2">
-                      {template.nodes.length} nodes
-                    </div>
-                  </button>
-                ))}
+              backgroundSize: '20px 20px',
+            }}
+          >
+            <div className="absolute inset-0 flex items-center justify-center p-6">
+              <div className="max-w-md rounded-lg border border-[var(--border-light)] bg-[var(--bg-elevated)] p-8 text-center shadow-lg">
+                <p className="mb-4 text-lg font-medium text-[var(--text-primary)]">Create a Workflow</p>
+                <p className="mb-6 text-sm text-[var(--text-muted)]">Choose a template to get started</p>
+                <div className="grid grid-cols-1 gap-3">
+                  {workflowTemplateCatalog.map(template => (
+                    <button
+                      key={template.id}
+                      onClick={() => handleCreateWorkflowFromTemplate(template.id)}
+                      className="rounded-lg border border-[var(--border)] p-4 text-left transition-colors hover:border-[var(--accent)] hover:bg-[var(--accent)]/5"
+                    >
+                      <div className="text-sm font-medium text-[var(--text-primary)]">{template.title}</div>
+                      <div className="mt-1 text-xs text-[var(--text-muted)]">{template.description}</div>
+                      <div className="mt-2 text-xs text-[var(--text-muted)]">{template.nodes.length} nodes</div>
+                    </button>
+                  ))}
+                </div>
+                <p className="mt-4 text-xs text-[var(--text-muted)]">
+                  Or pick an existing workflow above, then refine it here.
+                </p>
               </div>
-              <p className="text-xs text-[var(--text-muted)] mt-4">
-                Or select an existing workflow from the sidebar
-              </p>
             </div>
           </div>
         </div>
@@ -562,9 +612,32 @@ export function WorkflowsTab({ projectId }: WorkflowsTabProps) {
               />
             </div>
           )}
-          <section className="flex h-[calc(100vh-9rem)] flex-col space-y-6">
+          <section className="flex h-[calc(100vh-9rem)] flex-col gap-3">
+            <div className="shrink-0 overflow-hidden rounded-2xl border border-comfy-border bg-[var(--bg-elevated)] shadow-sm">
+              <WorkflowDocumentPicker
+                workflows={workflowsQuery.data}
+                isLoading={workflowsQuery.isLoading}
+                isError={workflowsQuery.isError}
+                allowEmptySelection={false}
+                selectedWorkflowId={selectedWorkflowId}
+                onSelectWorkflowId={id => {
+                  if (id && id !== selectedWorkflowId) {
+                    selectWorkflow(id);
+                  }
+                }}
+                onAddDefault={() => handleCreateWorkflowFromTemplate('storyboard_from_story')}
+                onDeleteSelected={() => {
+                  if (selectedWorkflowId && confirm('Delete this workflow? This cannot be undone.')) {
+                    deleteWorkflowMutation.mutate(selectedWorkflowId);
+                  }
+                }}
+                addPending={createWorkflowMutation.isPending}
+                deletePending={deleteWorkflowMutation.isPending}
+                className="p-4"
+              />
+            </div>
             <div
-              className="relative z-40 flex h-full flex-col rounded-[2rem] border border-[var(--border)] bg-[var(--bg-base)] shadow-sm overflow-hidden"
+              className="relative z-40 flex min-h-0 flex-1 flex-col overflow-hidden rounded-[2rem] border border-[var(--border)] bg-[var(--bg-base)] shadow-sm"
               style={{
                 backgroundImage: `
                 linear-gradient(to right, var(--border-light) 1px, transparent 1px),
@@ -638,32 +711,12 @@ export function WorkflowsTab({ projectId }: WorkflowsTabProps) {
                 </button>
                 <button
                   onClick={() => {
-                    void handleFreezeVersion();
+                    void handleRunWorkflow();
                   }}
-                  disabled={createVersionMutation.isPending || updateWorkflowMutation.isPending}
-                  className="rounded-full border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {createVersionMutation.isPending ? 'Freezing...' : 'Freeze Version'}
-                </button>
-                <button
-                  onClick={() => {
-                    void handleRunLatestVersion();
-                  }}
-                  disabled={createRunMutation.isPending}
+                  disabled={createRunMutation.isPending || updateWorkflowMutation.isPending}
                   className="rounded-full border border-[var(--success)] bg-[var(--success)]/20 px-4 py-2 text-sm font-medium text-[var(--success)] transition hover:bg-[var(--success)]/30 disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  {updateWorkflowMutation.isPending ? 'Starting...' : 'Run Latest Version'}
-                </button>
-                <button
-                  onClick={() => {
-                    if (confirm('Delete this workflow? This cannot be undone.')) {
-                      deleteWorkflowMutation.mutate(selectedWorkflowId!);
-                    }
-                  }}
-                  disabled={deleteWorkflowMutation.isPending}
-                  className="rounded-full border border-rose-300 bg-rose-50 px-4 py-2 text-sm font-medium text-rose-600 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {deleteWorkflowMutation.isPending ? 'Deleting...' : 'Delete'}
+                  {createRunMutation.isPending ? 'Starting...' : 'Run Workflow'}
                 </button>
               </div>
 
@@ -888,210 +941,6 @@ function JsonEditorCard({
         className="w-full rounded-[1.5rem] border border-slate-200 bg-slate-50 px-4 py-4 font-mono text-xs outline-none transition focus:border-slate-400 focus:bg-white"
       />
     </PanelCard>
-  );
-}
-
-function NodeConfigEditor({
-  node,
-  onChange,
-}: {
-  node: EditableNode;
-  onChange: (node: EditableNode) => void;
-}) {
-  if (node.type === 'input') {
-    return (
-      <Field label="Input Text">
-        <textarea
-          value={asString(node.params.text)}
-          onChange={event =>
-            onChange({
-              ...node,
-              params: {
-                ...node.params,
-                text: event.target.value,
-              },
-            })
-          }
-          rows={5}
-          className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-slate-400 focus:bg-white"
-        />
-      </Field>
-    );
-  }
-
-  if (node.type === 'llm_text') {
-    return (
-      <div className="grid gap-4">
-        <Field label="Prompt">
-          <textarea
-            value={asString(node.params.prompt)}
-            onChange={event =>
-              onChange({
-                ...node,
-                params: {
-                  ...node.params,
-                  prompt: event.target.value,
-                },
-              })
-            }
-            rows={6}
-            className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-slate-400 focus:bg-white"
-          />
-        </Field>
-        <Field label="Model">
-          <input
-            value={asString(node.params.model)}
-            onChange={event =>
-              onChange({
-                ...node,
-                params: {
-                  ...node.params,
-                  model: event.target.value,
-                },
-              })
-            }
-            className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-slate-400 focus:bg-white"
-          />
-        </Field>
-      </div>
-    );
-  }
-
-  if (node.type === 'image_generation' || node.type === 'video_generation') {
-    return (
-      <div className="grid gap-4">
-        <Field label="Prompt">
-          <textarea
-            value={asString(node.params.prompt)}
-            onChange={event =>
-              onChange({
-                ...node,
-                params: {
-                  ...node.params,
-                  prompt: event.target.value,
-                },
-              })
-            }
-            rows={5}
-            className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-slate-400 focus:bg-white"
-          />
-        </Field>
-        <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="Width">
-            <input
-              type="number"
-              value={asNumber(node.params.width)}
-              onChange={event =>
-                onChange({
-                  ...node,
-                  params: {
-                    ...node.params,
-                    width: Number(event.target.value),
-                  },
-                })
-              }
-              className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-slate-400 focus:bg-white"
-            />
-          </Field>
-          <Field label="Height">
-            <input
-              type="number"
-              value={asNumber(node.params.height)}
-              onChange={event =>
-                onChange({
-                  ...node,
-                  params: {
-                    ...node.params,
-                    height: Number(event.target.value),
-                  },
-                })
-              }
-              className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-slate-400 focus:bg-white"
-            />
-          </Field>
-        </div>
-      </div>
-    );
-  }
-
-  if (node.type === 'tts') {
-    return (
-      <div className="grid gap-4">
-        <Field label="Narration Text">
-          <textarea
-            value={asString(node.params.text)}
-            onChange={event =>
-              onChange({
-                ...node,
-                params: {
-                  ...node.params,
-                  text: event.target.value,
-                },
-              })
-            }
-            rows={5}
-            className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-slate-400 focus:bg-white"
-          />
-        </Field>
-        <div className="grid gap-4 sm:grid-cols-3">
-          <Field label="Voice">
-            <input
-              value={asString(node.params.template)}
-              onChange={event =>
-                onChange({
-                  ...node,
-                  params: {
-                    ...node.params,
-                    template: event.target.value,
-                  },
-                })
-              }
-              className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-slate-400 focus:bg-white"
-            />
-          </Field>
-          <Field label="Speed">
-            <input
-              type="number"
-              step="0.1"
-              value={asNumber(node.params.speed)}
-              onChange={event =>
-                onChange({
-                  ...node,
-                  params: {
-                    ...node.params,
-                    speed: Number(event.target.value),
-                  },
-                })
-              }
-              className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-slate-400 focus:bg-white"
-            />
-          </Field>
-          <Field label="Volume">
-            <input
-              type="number"
-              step="0.1"
-              value={asNumber(node.params.volume)}
-              onChange={event =>
-                onChange({
-                  ...node,
-                  params: {
-                    ...node.params,
-                    volume: Number(event.target.value),
-                  },
-                })
-              }
-              className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-slate-400 focus:bg-white"
-            />
-          </Field>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="rounded-2xl bg-slate-50 px-4 py-4 text-sm text-slate-600">
-      This node currently uses workflow-level defaults and connection metadata only.
-    </div>
   );
 }
 

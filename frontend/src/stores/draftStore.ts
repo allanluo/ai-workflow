@@ -34,8 +34,10 @@ export interface WorkflowDraftState {
 
 interface DraftStore {
   draft: WorkflowDraftState | null;
+  viewingVersionId: string | null;
   setDraft: (draft: WorkflowDraftState | ((prev: WorkflowDraftState | null) => WorkflowDraftState | null) | null) => void;
   updateDraft: (updater: (draft: WorkflowDraftState) => void) => void;
+  setViewingVersionId: (id: string | null) => void;
 }
 
 export function toEditableNode(node: unknown): EditableNode {
@@ -52,14 +54,17 @@ export function toEditableNode(node: unknown): EditableNode {
   const catalogType =
     typeof data.catalog_type === 'string' ? data.catalog_type : inferCatalogType(value.type);
 
+  const definition = getWorkflowNodeDefinition(catalogType);
+  const runtimeType = definition ? definition.runtimeType : (typeof value.type === 'string' ? value.type : 'input');
+
   return {
     id: typeof value.id === 'string' ? value.id : `node-${Math.random().toString(36).slice(2, 7)}`,
-    type: typeof value.type === 'string' ? value.type : 'input',
+    type: runtimeType,
     catalogType,
     label:
       typeof data.label === 'string'
         ? data.label
-        : (getWorkflowNodeDefinition(catalogType)?.defaultLabel ?? 'Workflow Step'),
+        : (definition?.defaultLabel ?? 'Workflow Step'),
     params,
     data,
     position: getGraphPosition(data) ?? { x: 0, y: 0 },
@@ -221,6 +226,7 @@ export function buildWorkflowPayload(draft: WorkflowDraftState) {
 
 export const useDraftStore = create<DraftStore>((set) => ({
   draft: null,
+  viewingVersionId: null,
   setDraft: (draftOrFn) => set((state) => ({
     draft: typeof draftOrFn === 'function' ? draftOrFn(state.draft) : draftOrFn
   })),
@@ -231,4 +237,5 @@ export const useDraftStore = create<DraftStore>((set) => ({
     updater(newDraft);
     return { draft: newDraft };
   }),
+  setViewingVersionId: (viewingVersionId) => set({ viewingVersionId }),
 }));

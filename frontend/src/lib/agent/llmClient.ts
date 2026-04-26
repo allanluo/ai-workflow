@@ -1,3 +1,5 @@
+import { API_BASE_URL } from '../api';
+
 type LLMGenerateResponse = {
   model?: string;
   response?: string;
@@ -8,11 +10,11 @@ export async function llmGenerateText(input: {
   model?: string;
   stream?: boolean;
 }): Promise<string> {
-  const response = await fetch('/api/llm/generate', {
+  const response = await fetch(`${API_BASE_URL}/llm/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      model: input.model ?? 'gemma3:1b',
+      model: input.model ?? 'gemma4:e2b',
       prompt: input.prompt,
       stream: input.stream ?? false,
     }),

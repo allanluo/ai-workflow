@@ -6,6 +6,8 @@ import { showToast } from '../../stores';
 interface ShotEditorProps {
   projectId: string;
   shot: Shot;
+  onSave?: (updates: Partial<Shot>) => void;
+  isMutating?: boolean;
 }
 
 const shotTypes = ['Wide', 'Medium', 'Close-up', 'Extreme Close-up', 'Over the Shoulder', 'POV'];
@@ -42,14 +44,24 @@ type StoredDialogue = Record<
   }
 >;
 
-export function ShotEditor({ projectId, shot }: ShotEditorProps) {
+export function ShotEditor({ projectId, shot, onSave, isMutating }: ShotEditorProps) {
   const sfxWorkflow = (import.meta.env.VITE_SFX_WORKFLOW as string | undefined) || 'sfx';
   const [prompt, setPrompt] = useState(shot.prompt);
-  const [negativePrompt, setNegativePrompt] = useState(shot.negativePrompt);
-  const [shotType, setShotType] = useState(shot.shotType);
-  const [angle, setAngle] = useState(shot.angle);
-  const [motion, setMotion] = useState(shot.motion);
-  const [duration, setDuration] = useState(shot.duration);
+  const [action, setAction] = useState(shot.action || '');
+  const [narration, setNarration] = useState(shot.narration || '');
+  const [internalMonologue, setInternalMonologue] = useState(shot.internal_monologue || '');
+  const [dialogue, setDialogue] = useState(shot.dialogue || '');
+  const [characters, setCharacters] = useState<string[]>(shot.characters || []);
+  const [environment, setEnvironment] = useState(shot.environment || '');
+  const [props, setProps] = useState<string[]>(shot.props || []);
+  const [frame_prompt, setFramePrompt] = useState(shot.frame_prompt || '');
+  const [video_prompt, setVideoPrompt] = useState(shot.video_prompt || '');
+
+  const [negative_prompt, setNegativePrompt] = useState(shot.negative_prompt || '');
+  const [shot_type, setShotType] = useState(shot.shot_type || '');
+  const [angle, setAngle] = useState(shot.angle || '');
+  const [motion, setMotion] = useState(shot.motion || '');
+  const [duration, setDuration] = useState(shot.duration || 3);
   const [isDirty, setIsDirty] = useState(false);
 
   const [voiceOverTextByShotId, setVoiceOverTextByShotId] = useState<Record<string, string>>({});
@@ -84,13 +96,39 @@ export function ShotEditor({ projectId, shot }: ShotEditorProps) {
 
   useEffect(() => {
     setPrompt(shot.prompt);
-    setNegativePrompt(shot.negativePrompt);
-    setShotType(shot.shotType);
-    setAngle(shot.angle);
-    setMotion(shot.motion);
-    setDuration(shot.duration);
+    setAction(shot.action || '');
+    setNarration(shot.narration || '');
+    setInternalMonologue(shot.internal_monologue || '');
+    setDialogue(shot.dialogue || '');
+    setCharacters(shot.characters || []);
+    setEnvironment(shot.environment || '');
+    setProps(shot.props || []);
+    setFramePrompt(shot.frame_prompt || '');
+    setVideoPrompt(shot.video_prompt || '');
+
+    setNegativePrompt(shot.negative_prompt || '');
+    setShotType(shot.shot_type || '');
+    setAngle(shot.angle || '');
+    setMotion(shot.motion || '');
+    setDuration(shot.duration || 3);
     setIsDirty(false);
-  }, [shot.id]);
+  }, [
+    shot.id,
+    shot.prompt,
+    shot.action,
+    shot.narration,
+    shot.internal_monologue,
+    shot.dialogue,
+    shot.characters,
+    shot.environment,
+    shot.props,
+    shot.frame_prompt,
+    shot.video_prompt,
+    shot.shot_type,
+    shot.angle,
+    shot.motion,
+    shot.duration,
+  ]);
 
   const makeLineId = () => `${Date.now()}_${Math.random().toString(16).slice(2)}`;
 
@@ -533,7 +571,7 @@ export function ShotEditor({ projectId, shot }: ShotEditorProps) {
     const description = (shot.prompt || '').trim() || (shot.subtitle || '').trim();
     const details = [
       shot.sceneId ? `scene: ${shot.sceneId}` : null,
-      shot.shotType ? `framing: ${shot.shotType}` : null,
+      shot.shot_type ? `framing: ${shot.shot_type}` : null,
       shot.motion ? `motion: ${shot.motion}` : null,
     ]
       .filter(Boolean)
@@ -547,7 +585,7 @@ export function ShotEditor({ projectId, shot }: ShotEditorProps) {
     ]
       .filter(Boolean)
       .join(' ');
-  }, [shot.motion, shot.prompt, shot.sceneId, shot.shotType, shot.subtitle]);
+  }, [shot.motion, shot.prompt, shot.sceneId, shot.shot_type, shot.subtitle]);
 
   const handleGenerateSfx = async () => {
     if (!projectId) return;
@@ -702,35 +740,66 @@ export function ShotEditor({ projectId, shot }: ShotEditorProps) {
   };
 
   const handleSaveDraft = () => {
-    console.log('Save draft');
+    if (!onSave) return;
+    onSave({
+      prompt,
+      negative_prompt,
+      shot_type,
+      angle,
+      motion,
+      duration,
+      action,
+      narration,
+      internal_monologue: internalMonologue,
+      dialogue,
+      characters,
+      environment,
+      props,
+      frame_prompt,
+      video_prompt,
+    });
     setIsDirty(false);
   };
 
   const handleNewVersion = () => {
-    console.log('New version');
-    setIsDirty(false);
+    // Same as save draft for now in this context
+    handleSaveDraft();
   };
 
   return (
     <div className="space-y-6">
       <div>
-        <label className="block text-sm font-medium text-comfy-text mb-2">Prompt</label>
+        <label className="block text-[10px] font-bold uppercase tracking-wider text-comfy-muted mb-2">Primary Action</label>
+        <textarea
+          value={action}
+          onChange={e => {
+            setAction(e.target.value);
+            setIsDirty(true);
+          }}
+          rows={3}
+          className="comfy-input w-full text-sm resize-none"
+          placeholder="What is happening in this shot?"
+        />
+      </div>
+
+      <div>
+        <label className="block text-[10px] font-bold uppercase tracking-wider text-comfy-muted mb-2">Legacy Prompt / Description</label>
         <textarea
           value={prompt}
           onChange={e => {
             setPrompt(e.target.value);
             setIsDirty(true);
           }}
-          rows={5}
-          className="comfy-input w-full text-sm resize-none"
+          rows={2}
+          className="comfy-input w-full text-xs text-comfy-muted resize-none opacity-80"
           placeholder="Describe the shot..."
         />
       </div>
 
       <div>
-        <label className="block text-sm font-medium text-comfy-text mb-2">Negative Prompt</label>
+        <label className="block text-sm font-medium text-comfy-text mb-2">Negative Prompt (Continuity Notes)</label>
         <textarea
-          value={negativePrompt}
+          value={negative_prompt}
           onChange={e => {
             setNegativePrompt(e.target.value);
             setIsDirty(true);
@@ -747,18 +816,20 @@ export function ShotEditor({ projectId, shot }: ShotEditorProps) {
           <div>
             <label className="block text-xs text-comfy-muted mb-1">Shot Type</label>
             <select
-              value={shotType}
+              value={shot_type}
               onChange={e => {
                 setShotType(e.target.value);
                 setIsDirty(true);
               }}
-              className="comfy-input w-full text-sm"
+              className="comfy-input w-full text-xs"
             >
+              <option value="">Select type...</option>
               {shotTypes.map(t => (
-                <option key={t} value={t}>
-                  {t}
-                </option>
+                <option key={t} value={t}>{t}</option>
               ))}
+              {shot_type && !shotTypes.includes(shot_type) && (
+                <option value={shot_type}>{shot_type} (Custom)</option>
+              )}
             </select>
           </div>
           <div>
@@ -776,6 +847,9 @@ export function ShotEditor({ projectId, shot }: ShotEditorProps) {
                   {a}
                 </option>
               ))}
+              {angle && !angles.includes(angle) && (
+                <option value={angle}>{angle} (Custom)</option>
+              )}
             </select>
           </div>
           <div>
@@ -793,6 +867,9 @@ export function ShotEditor({ projectId, shot }: ShotEditorProps) {
                   {m}
                 </option>
               ))}
+              {motion && !motions.includes(motion) && (
+                <option value={motion}>{motion} (Custom)</option>
+              )}
             </select>
           </div>
           <div>
@@ -813,23 +890,92 @@ export function ShotEditor({ projectId, shot }: ShotEditorProps) {
       </div>
 
       <div className="border-t border-comfy-border pt-4">
-        <h4 className="text-sm font-semibold text-comfy-text mb-3">Continuity</h4>
-        <div className="space-y-2">
+        <h4 className="text-[10px] font-bold uppercase tracking-wider text-comfy-muted mb-3">Production Detail</h4>
+        <div className="space-y-4">
           <div>
-            <label className="block text-xs text-comfy-muted mb-1">Character References</label>
+            <label className="block text-xs text-comfy-text mb-1.5">Characters</label>
             <div className="flex flex-wrap gap-1.5">
-              <span className="comfy-tag">John</span>
-              <span className="comfy-tag">Sarah</span>
-              <button className="comfy-tag-dashed">+ Add</button>
+              {characters.map((c, i) => (
+                <span key={i} className="comfy-tag">{c}</span>
+              ))}
+              <input 
+                className="comfy-input text-[10px] py-0.5 px-2 w-24" 
+                placeholder="+ Add"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    const val = e.currentTarget.value.trim();
+                    if (val) {
+                      setCharacters([...characters, val]);
+                      e.currentTarget.value = '';
+                      setIsDirty(true);
+                    }
+                  }
+                }}
+              />
             </div>
           </div>
           <div>
-            <label className="block text-xs text-comfy-muted mb-1">Environment References</label>
+            <label className="block text-xs text-comfy-text mb-1.5">Environment</label>
+            <input 
+              value={environment}
+              onChange={e => { setEnvironment(e.target.value); setIsDirty(true); }}
+              className="comfy-input w-full text-sm"
+              placeholder="e.g. Sunny Beach, Interior Studio"
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-comfy-text mb-1.5">Props</label>
             <div className="flex flex-wrap gap-1.5">
-              <span className="comfy-tag-success">City Street</span>
-              <span className="comfy-tag-success">Office</span>
-              <button className="comfy-tag-dashed">+ Add</button>
+              {props.map((p, i) => (
+                <span key={i} className="comfy-item-badge text-[10px]">{p}</span>
+              ))}
+              <input 
+                className="comfy-input text-[10px] py-0.5 px-2 w-24" 
+                placeholder="+ Add"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    const val = e.currentTarget.value.trim();
+                    if (val) {
+                      setProps([...props, val]);
+                      e.currentTarget.value = '';
+                      setIsDirty(true);
+                    }
+                  }
+                }}
+              />
             </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="border-t border-comfy-border pt-4">
+        <h4 className="text-[10px] font-bold uppercase tracking-wider text-comfy-muted mb-3">Generation Prompts</h4>
+        <div className="space-y-4">
+          <div>
+            <label className="block text-[10px] font-bold uppercase tracking-wider text-comfy-muted mb-1">Frame Prompt (Stills)</label>
+            <textarea
+              value={frame_prompt}
+              onChange={e => {
+                setFramePrompt(e.target.value);
+                setIsDirty(true);
+              }}
+              rows={3}
+              className="comfy-input w-full text-xs resize-none"
+              placeholder="Detailed visual prompt for image generation..."
+            />
+          </div>
+          <div>
+            <label className="block text-[10px] font-bold uppercase tracking-wider text-comfy-muted mb-1">Video Prompt (Motion)</label>
+            <textarea
+              value={video_prompt}
+              onChange={e => {
+                setVideoPrompt(e.target.value);
+                setIsDirty(true);
+              }}
+              rows={3}
+              className="comfy-input w-full text-xs resize-none"
+              placeholder="Detailed motion prompt for video generation..."
+            />
           </div>
         </div>
       </div>
@@ -1051,19 +1197,23 @@ export function ShotEditor({ projectId, shot }: ShotEditorProps) {
       <div className="border-t border-comfy-border pt-4 flex gap-2">
         <button
           onClick={handleSaveDraft}
-          disabled={!isDirty}
+          disabled={!isDirty || isMutating}
           className="comfy-btn-secondary disabled:opacity-50"
         >
-          Save Draft
+          {isMutating ? 'Saving...' : 'Save Changes'}
         </button>
-        <button onClick={handleNewVersion} className="comfy-btn">
-          New Version
+        <button 
+           onClick={handleNewVersion} 
+           className="comfy-btn"
+           disabled={isMutating}
+        >
+          Commit Version
         </button>
         <button
           onClick={() => {
             setPrompt(shot.prompt);
-            setNegativePrompt(shot.negativePrompt);
-            setShotType(shot.shotType);
+            setNegativePrompt(shot.negative_prompt);
+            setShotType(shot.shot_type);
             setAngle(shot.angle);
             setMotion(shot.motion);
             setDuration(shot.duration);

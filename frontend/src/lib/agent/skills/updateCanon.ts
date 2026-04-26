@@ -2,6 +2,7 @@ import type { Asset } from '../../api';
 import type { JsonPatchOperation, Skill, SkillContext, SkillResult } from '../types';
 import { extractFirstJsonObjectLenient } from '../llmClient';
 import { executeTool } from '../tools';
+import { isCanonLike } from '../context/buildContext';
 
 type UserIntentMode = 'discussion' | 'direction' | 'correction' | 'application';
 
@@ -60,20 +61,32 @@ function detectUserIntentMode(input: string): UserIntentMode {
 }
 
 // Extract individual field from text
-function extractField(text: string, fieldName: string): string {
-  // First try to match quoted values (handles "value" or 'value')
-  const quotedRe = new RegExp(`\\b${fieldName}\\s*:\\s*["']([^"']+)["']`, 'i');
-  let m = text.match(quotedRe);
+function extractField(input: string, key: string): string {
+  const t = (input || '').trim();
+  if (!t) return '';
+  
+  // 1. Try quoted match first (e.g., face: "pale skin")
+  const quotedRe = new RegExp(`\\b${key}\\s*[:=-]\\s*["']([^"']+)["']`, 'i');
+  let m = t.match(quotedRe);
   if (m?.[1]) {
-    return clamp(normalizeWhitespace(m[1].trim()), 180);
+    return clamp(normalizeWhitespace(m[1]), 180);
   }
 
-  // Fall back to comma-separated logic (original behavior)
-  const re = new RegExp(`\\b${fieldName}\\s*:\\s*([^,\\n]+?)(?=\\s*,\\s*\\b(?:face|hair|clothing|shoes|hat|accessories|body|details|name|role|appearance)\\s*:|\\s*,\\s*$|\\n|$)`, 'i');
-  m = text.match(re);
-  const value = m?.[1] ? normalizeWhitespace(m[1].trim()) : '';
-  // Clean trailing comma if present
-  const cleaned = value.replace(/,\s*$/, '').trim();
+  // 2. Try generic match until next known key or chat label
+  const keyEsc = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const otherKeys = APPEARANCE_KEYS.filter(k => k !== key).map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  
+  // Regex that allows multi-line values and stops at the next known key or end of input
+  const re = new RegExp(`\\b${keyEsc}\\s*[:=-]\\s*(.*?)(?=\\s*\\b(?:${otherKeys})\\s*[:=-]|\\s*(?:USER|ASSISTANT|SYSTEM|PROPOSAL|CHANGES|CLARIFICATIONS)\\s*[:=-]|$)`, 'is');
+  m = t.match(re);
+  let cleaned = m?.[1] ? normalizeWhitespace(m[1]) : '';
+  
+  // Aggressively strip chat noise: find the first occurrence of any chat label and cut everything after it
+  const chatLabelIdx = cleaned.search(/\b(USER|ASSISTANT|COPILOT|SYSTEM|CLARIFICATIONS|DISCUSSION_CONTEXT)\s*:/i);
+  if (chatLabelIdx >= 0) {
+    cleaned = cleaned.slice(0, chatLabelIdx).trim();
+  }
+  
   return cleaned ? clamp(cleaned, 180) : '';
 }
 
@@ -118,15 +131,15 @@ function extractAppearanceKeyValues(text: string) {
 
 function buildAppearanceFallbackLines(input: {
   requestedKeys: Array<keyof CanonCharacterAppearance>;
-  allan: any;
+  character: any;
   discussionText?: string;
 }) {
   const requested = input.requestedKeys ?? [];
-  const allan = input.allan ?? null;
-  const descFromCanon = typeof allan?.description === 'string' ? stripMarkdownLike(allan.description) : '';
-  const descFromDiscussion = input.discussionText ? extractAllanDescription(input.discussionText) : '';
+  const char = input.character ?? null;
+  const descFromCanon = typeof char?.description === 'string' ? stripMarkdownLike(char.description) : '';
+  const descFromDiscussion = input.discussionText ? extractCharacterDescription(input.discussionText) : '';
   const desc = descFromDiscussion || descFromCanon;
-  const existing = allan?.appearance && typeof allan.appearance === 'object' && !Array.isArray(allan.appearance) ? allan.appearance : {};
+  const existing = char?.appearance && typeof char.appearance === 'object' && !Array.isArray(char.appearance) ? char.appearance : {};
 
   const getExisting = (k: keyof CanonCharacterAppearance) => {
     const v = typeof existing?.[k] === 'string' ? String(existing[k]).trim() : '';
@@ -201,8 +214,18 @@ function stripMarkdownLike(text: string) {
 
 function stripChattyPreamble(text: string) {
   let t = String(text || '').trim();
-  t = t.replace(/^(okay|alright|sure|great|i understand)\b[.:!,-]?\s*/i, '');
+  t = t.replace(/^(okay|alright|sure|great|i understand|here'?s a proposal)\b[.:!,-]?\s*/i, '');
   t = t.replace(/^let['’]s\b[^.?!]*[.?!]\s*/i, '');
+  return t.trim();
+}
+
+function stripChatLabels(text: string) {
+  let t = String(text || '').trim();
+  // Remove labels like ASSISTANT:, USER:, SYSTEM:, DISCUSSION_CONTEXT:, CLARIFICATIONS:
+  // Also remove anything that looks like an LLM responding to itself or a conversation log
+  t = t.replace(/\b(ASSISTANT|USER|SYSTEM|DISCUSSION_CONTEXT|CLARIFICATIONS|PROPOSAL|CHANGES)\s*:.*$/is, '');
+  // Also handle cases where they are in the middle of a line
+  t = t.replace(/\b(ASSISTANT|USER|SYSTEM|DISCUSSION_CONTEXT|CLARIFICATIONS)\s*:/gi, '');
   return t.trim();
 }
 
@@ -216,11 +239,26 @@ function isMeaningfulFieldValue(value: string) {
   const v = (value || '').trim();
   if (!v) return false;
   const lower = v.toLowerCase();
-  // Reject exact matches and variants of "unspecified"/"unknown"
-  if (lower === 'unspecified' || lower === 'unknown' || /^unspecified\b|^unknown\b/i.test(v.trim())) return false;
+  
+  // Reject exact matches and placeholders that mean "missing"
+  const placeholders = [
+    'unspecified', 
+    'unknown', 
+    'not described', 
+    'not specified', 
+    'n/a', 
+    'none', 
+    'not mentioned',
+    'none given',
+    'unavailable'
+  ];
+  
+  if (placeholders.includes(lower) || placeholders.some(p => lower.startsWith(p + ' '))) return false;
+  
   // Also reject if it's ONLY describing the problem without providing real value
-  // (e.g., "Unspecified is not right", "only Unspecified")
   if (/\bunspecified\b.*only\b|only.*\bunspecified\b/i.test(v)) return false;
+  if (/^as described in.*$/i.test(v)) return false; // Common AI hallucination: "As described in input"
+  
   return true;
 }
 
@@ -237,28 +275,29 @@ function extractBetween(text: string, startRe: RegExp, endRes: RegExp[]) {
   return rest.slice(0, end).trim();
 }
 
-function extractAllanDescription(text: string) {
+function extractCharacterDescription(text: string, charName?: string) {
   const raw = stripMarkdownLike(text);
   if (!raw) return '';
 
-  const descBlock = extractBetween(raw, /\bdescription:\s*/i, [
+  const nameToFind = (charName || 'Allan').toLowerCase();
+  const descBlock = extractBetween(raw, new RegExp(`\\b${nameToFind}:?\\s+description:\\s*`, 'i'), [
     /\bappearance:\s*/i,
     /\bpersonality:\s*/i,
     /\brelationships?:\s*/i,
   ]);
   if (descBlock) {
-    return clamp(stripChattyPreamble(descBlock), 420);
+    return clamp(stripChatLabels(stripChattyPreamble(descBlock)), 420);
   }
 
-  const idx = raw.toLowerCase().indexOf('allan is');
+  const idx = raw.toLowerCase().indexOf(`${nameToFind} is`);
   if (idx >= 0) {
     const tail = raw.slice(idx);
-    const stop = extractBetween(tail, /^allan is\s*/i, [/\bappearance:\s*/i, /\bpersonality:\s*/i, /\brelationships?:\s*/i]);
-    const candidate = (stop ? `Allan is ${stop}` : tail).trim();
-    return clamp(stripChattyPreamble(candidate), 420);
+    const stop = extractBetween(tail, new RegExp(`^${nameToFind} is\\s*`, 'i'), [/\bappearance:\s*/i, /\bpersonality:\s*/i, /\brelationships?:\s*/i]);
+    const candidate = (stop ? `${charName || 'Allan'} is ${stop}` : tail).trim();
+    return clamp(stripChatLabels(stripChattyPreamble(candidate)), 420);
   }
 
-  return clamp(stripChattyPreamble(raw), 420);
+  return clamp(stripChatLabels(stripChattyPreamble(raw)), 420);
 }
 
 function isPatchOp(op: unknown): op is JsonPatchOperation {
@@ -327,45 +366,99 @@ function findCharacterIndexByName(characters: unknown, name: string) {
   if (!Array.isArray(characters)) return null;
   const wanted = (name || '').trim().toLowerCase();
   if (!wanted) return null;
-  const idx = characters.findIndex(c => getCharacterName(c).toLowerCase() === wanted);
+  
+  // Try exact match first
+  let idx = characters.findIndex(c => getCharacterName(c).toLowerCase() === wanted);
+  if (idx >= 0) return idx;
+  
+  // Try fuzzy match
+  idx = characters.findIndex(c => {
+    const n = getCharacterName(c).toLowerCase();
+    return n.includes(wanted) || (n.length > 3 && wanted.includes(n));
+  });
+  
   return idx >= 0 ? idx : null;
 }
 
-function looksLikeUserOnlyMentionsAllan(text: string) {
-  const t = (extractDirectiveWindow(text) || '').toLowerCase();
-  if (!t.includes('allan')) return false;
-  // If other names are explicitly mentioned, don't over-constrain.
-  if (/\byiga\b/.test(t)) return false;
-  if (/\b(sarah|john|maria|david)\b/.test(t)) return false;
-  return true;
+function findPrimaryCharacterIndex(characters: unknown): number | null {
+  if (!Array.isArray(characters)) return null;
+  
+  // 1. First one named Allan (legacy support)
+  const byName = findCharacterIndexByName(characters, 'Allan');
+  if (byName !== null) return byName;
+  
+  // 2. First one with role "protagonist"
+  const byRole = characters.findIndex(c => 
+    String(c?.role || '').toLowerCase().includes('protagonist')
+  );
+  if (byRole >= 0) return byRole;
+  
+  // 3. Fallback to index 0
+  if (characters.length > 0) return 0;
+  
+  return null;
 }
 
-function extractDirectiveHead(text: string) {
-  const t = (text || '').trim();
-  if (!t) return '';
-  const firstLine = t.split('\n')[0] ?? t;
-  const head = firstLine.slice(0, 320);
-  const colon = head.indexOf(':');
-  if (colon > 0 && colon < 180) return head.slice(0, colon).trim();
-  return head.trim();
+function resolveTargetCharacterIndex(characters: any[], userRequest: string): number {
+  if (!Array.isArray(characters) || characters.length === 0) return 0;
+  
+  const text = (userRequest || '').toLowerCase();
+  
+  // 1. Check for specific names from the document
+  for (let i = 0; i < characters.length; i++) {
+    const name = getCharacterName(characters[i]).toLowerCase();
+    if (name && name.length > 2 && text.includes(name)) return i;
+  }
+  
+  // 2. Check for Role/Identity keywords
+  for (let i = 0; i < characters.length; i++) {
+    const identity = (characters[i].identity || '').toLowerCase();
+    if (identity && identity.length > 3 && text.includes(identity)) return i;
+  }
+  
+  // 3. Fallback to primary logic
+  const primaryIdx = findPrimaryCharacterIndex(characters);
+  return primaryIdx !== null ? primaryIdx : 0;
+}
+
+function looksLikeUserOnlyMentionsSingleCharacter(text: string, characters: any[]) {
+  if (!Array.isArray(characters)) return false;
+  const t = (extractDirectiveWindow(text) || '').toLowerCase();
+  const mentionedIdxs: number[] = [];
+  for (let i = 0; i < characters.length; i++) {
+    const name = getCharacterName(characters[i]).toLowerCase();
+    if (name && name.length > 2 && t.includes(name)) {
+      mentionedIdxs.push(i);
+    }
+  }
+  // If exactly one character is mentioned, we can assume them as the single target.
+  return mentionedIdxs.length === 1;
 }
 
 function extractDirectiveWindow(text: string) {
   const t = (text || '').trim();
   if (!t) return '';
-  // Many users paste long assistant text after a ":"; include a small window after it.
-  return t.slice(0, 700).trim();
+  return t.slice(0, 1200).trim();
 }
 
-function explicitlyTargetsAllan(text: string) {
-  const head = extractDirectiveHead(text);
-  const window = extractDirectiveWindow(text);
-  const scope = /\ballan\b/i.test(head) ? head : window;
-  if (!/\ballan\b/i.test(scope)) return false;
-  if (/\bappearance\b/i.test(scope)) return true;
-  if (/\b(face|hair|clothing|shoes|hat|accessories)\b/i.test(scope)) return true;
-  if (/\b(update|edit|change|set|replace|write)\b/i.test(scope)) return true;
-  return false;
+function explicitlyTargetsSingleCharacter(text: string, characters: any[]) {
+  if (!Array.isArray(characters)) return null;
+  const t = stripMarkdownLike(text || '').toLowerCase();
+  if (!t) return null;
+  
+  const mentionsAppearance = /\b(face|hair|clothing|shoes|hat|accessories|appearance)\b/.test(t);
+  const mentionsUpdate = /\b(update|edit|change|set|replace|write|fix|suggestion)\b/.test(t);
+  
+  for (let i = 0; i < characters.length; i++) {
+    const name = getCharacterName(characters[i]).toLowerCase();
+    if (name && name.length > 2 && t.includes(name)) {
+      if (t.includes(`${name}:`) || mentionsAppearance || mentionsUpdate) {
+        return { index: i, name: getCharacterName(characters[i]) };
+      }
+    }
+  }
+  
+  return null;
 }
 
 function coerceAppearanceValue(value: unknown) {
@@ -462,40 +555,30 @@ function coerceAppearanceValue(value: unknown) {
   return null;
 }
 
-function extractAllanDescriptionFromDiscussion(discussion: string) {
+function extractCharacterDescriptionFromDiscussion(discussion: string, charName?: string) {
   const text = (discussion || '').trim();
   if (!text) return '';
-  // Avoid brittle quote parsing (users often include nested quotes like 5'10").
-  return extractAllanDescription(text);
+  return extractCharacterDescription(text, charName);
 }
 
-function buildDeterministicAllanPatch(input: {
+function buildDeterministicCharacterPatch(input: {
   current: Record<string, unknown>;
   discussion: string;
 }) : JsonPatchOperation[] | null {
-  const characters = (input.current as any)?.characters;
-  const allanIndex = findCharacterIndexByName(characters, 'Allan');
-  const desc = extractAllanDescriptionFromDiscussion(input.discussion);
+  const characters = (input.current as any)?.characters || [];
+  const target = explicitlyTargetsSingleCharacter(input.discussion, characters);
+  if (!target) return null;
+  
+  const charIndex = target.index;
+  const charName = target.name;
+  const desc = extractCharacterDescriptionFromDiscussion(input.discussion, charName);
   if (!desc) return null;
   const appearance = coerceAppearanceValue(desc);
 
   const ops: JsonPatchOperation[] = [];
-  if (!Array.isArray(characters)) {
-    ops.push({ op: 'add', path: '/characters', value: [] });
-  }
-  if (allanIndex === null) {
-    const newChar: CanonCharacter = {
-      name: 'Allan',
-      role: 'Protagonist',
-      description: desc,
-      appearance: appearance ?? undefined,
-    };
-    ops.push({ op: 'add', path: '/characters/-', value: newChar });
-    return ops;
-  }
-  ops.push({ op: 'replace', path: `/characters/${allanIndex}/description`, value: desc });
+  ops.push({ op: 'replace', path: `/characters/${charIndex}/description`, value: desc });
   if (appearance && Object.keys(appearance).length > 0) {
-    const currentChar = Array.isArray(characters) ? (characters as any[])[allanIndex] : null;
+    const currentChar = (characters as any[])[charIndex];
     const existing =
       currentChar?.appearance && typeof currentChar.appearance === 'object' && !Array.isArray(currentChar.appearance)
         ? (currentChar.appearance as Record<string, unknown>)
@@ -504,7 +587,7 @@ function buildDeterministicAllanPatch(input: {
     for (const [k, v] of Object.entries(appearance)) {
       if (typeof v === 'string' && v.trim()) merged[k] = v.trim();
     }
-    ops.push({ op: 'replace', path: `/characters/${allanIndex}/appearance`, value: merged });
+    ops.push({ op: 'replace', path: `/characters/${charIndex}/appearance`, value: merged });
   }
   return ops;
 }
@@ -516,8 +599,10 @@ function normalizeCanonPatch(input: {
   discussion: string;
 }) {
   const characters = (input.current as any)?.characters;
-  const allanIndex = findCharacterIndexByName(characters, 'Allan');
-  const mentionsOnlyAllan = looksLikeUserOnlyMentionsAllan(input.userRequest) || explicitlyTargetsAllan(input.userRequest);
+  const target = explicitlyTargetsSingleCharacter(input.userRequest + " " + input.discussion, Array.isArray(characters) ? characters : []);
+  const mentionsOnlySingle = !!target || looksLikeUserOnlyMentionsSingleCharacter(input.userRequest + " " + input.discussion, Array.isArray(characters) ? characters : []);
+  const targetIndex = target?.index ?? resolveTargetCharacterIndex(Array.isArray(characters) ? characters : [], input.userRequest + " " + input.discussion);
+  const targetName = (target?.name || (Array.isArray(characters) && characters[targetIndex] ? getCharacterName(characters[targetIndex]) : '')).toLowerCase();
 
   const normalized: JsonPatchOperation[] = [];
   for (const op of input.patch) {
@@ -525,40 +610,43 @@ function normalizeCanonPatch(input: {
     const path = String((op as any).path ?? '');
     if (!path.startsWith('/')) continue;
 
-    // If the user is only asking about Allan, do not allow "replace the entire characters list"
-    // (a common failure mode that corrupts other characters).
-    if (mentionsOnlyAllan && path === '/characters') {
+    // If the user is only asking about a specific character, do not allow "replace the entire characters list"
+    if (mentionsOnlySingle && path === '/characters') {
       const currentHasCharacters = Array.isArray(characters);
-      // Allow creating the container only when missing.
       if (op.op === 'add' && !currentHasCharacters && Array.isArray((op as any).value) && (op as any).value.length === 0) {
         normalized.push(op);
       }
       continue;
     }
 
-    if (mentionsOnlyAllan && path.startsWith('/characters/') && allanIndex !== null) {
-      // Only allow Allan's subtree (or redirects handled below).
-      const isAllanSubtree = path.startsWith(`/characters/${allanIndex}/`) || path === `/characters/${allanIndex}`;
+    if (mentionsOnlySingle && path.startsWith('/characters/') && targetIndex !== null) {
+      const isTargetSubtree = path.startsWith(`/characters/${targetIndex}/`) || path === `/characters/${targetIndex}`;
       const idx = parseCharacterIndexFromPath(path);
-      if (idx === null && !isAllanSubtree) {
-        // Blocks "/characters/-" or other non-index updates when Allan-only.
+      if (idx === null && !isTargetSubtree) {
         continue;
       }
     }
 
-    // If the user only mentions Allan, don't allow patching other characters by index.
+    // Catch character index updates (e.g., /characters/2/face)
     const idx = parseCharacterIndexFromPath(path);
-    if (mentionsOnlyAllan && idx !== null && Array.isArray(characters)) {
+    if (mentionsOnlySingle && idx !== null && targetIndex !== null && idx !== targetIndex) {
+      const rewrittenPath = path.replace(/^\/characters\/\d+/, `/characters/${targetIndex}`);
+      const nextOp: any = { ...op, path: rewrittenPath };
+      normalized.push(nextOp);
+      continue;
+    }
+
+    // Fallback redirect if character name at idx is wrong but value mentions the intended target.
+    if (idx !== null && Array.isArray(characters) && targetName) {
       const name = getCharacterName((characters as any[])[idx]);
-      if (name && name.toLowerCase() !== 'allan') {
-        // If the value itself references Allan, redirect to Allan when possible.
+      if (name && name.toLowerCase() !== targetName) {
         const valueText = isAddOrReplace(op) && typeof (op as any).value === 'string' ? String((op as any).value) : '';
-        if (allanIndex !== null && /allan/i.test(valueText)) {
-          const rewrittenPath = path.replace(/^\/characters\/\d+/, `/characters/${allanIndex}`);
+        if (targetIndex !== null && valueText.toLowerCase().includes(targetName)) {
+          const rewrittenPath = path.replace(/^\/characters\/\d+/, `/characters/${targetIndex}`);
           const nextOp: any = { ...op, path: rewrittenPath };
           normalized.push(nextOp);
+          continue;
         }
-        continue;
       }
     }
 
@@ -575,6 +663,24 @@ function normalizeCanonPatch(input: {
       if (!v) continue;
       normalized.push({ ...op, value: v } as any);
       continue;
+    }
+
+    // Smart Redirect: if op is add /characters/- and it contains a character that already exists, replace it at that index.
+    if (op.op === 'add' && path === '/characters/-' && typeof (op as any).value === 'object' && (op as any).value !== null) {
+      const val = (op as any).value;
+      const name = getCharacterName(val);
+      if (name) {
+        const existingIdx = findCharacterIndexByName(characters, name);
+        if (existingIdx !== null) {
+          // Use "replace" but target the existing index
+          normalized.push({
+            op: 'replace',
+            path: `/characters/${existingIdx}`,
+            value: val
+          });
+          continue;
+        }
+      }
     }
 
     normalized.push(op);
@@ -649,26 +755,33 @@ export const updateCanonSkill: Skill = {
       const body = isCompile ? (input || '').slice(compileMarker.length) : (input || '');
       const { userRequest, discussion } = splitDiscussionContext(body);
 
-      // 1) Select canon asset (focused one if it is canon_text, else latest).
+      // 1) Select canon asset (focused one if it is canon-like, else latest).
       let focusedCanon: Asset | null = null;
       if (context.assetId) {
         const focusedRes = await executeTool('fetchAsset', context, { assetId: context.assetId });
         if (focusedRes.ok) {
           const a = focusedRes.data as Asset;
-          if (a.asset_type === 'canon_text' && a.status !== 'deprecated') focusedCanon = a;
+          const content = (a.current_version?.content as any);
+          const isCanonLike = Array.isArray(content?.characters) || !!content?.summary;
+          if (isCanonLike && a.status !== 'deprecated') focusedCanon = a;
         }
       }
 
-      const canonAssetsRes = await executeTool('fetchProjectAssets', context, { assetType: 'canon_text' });
-      if (!canonAssetsRes.ok) return { success: false, message: canonAssetsRes.error.message };
-      const canonAssets = canonAssetsRes.data as Asset[];
+      // Fetch all project assets and filter for canon-like ones locally since the fetch tool is limited to types
+      const allAssetsRes = await executeTool('fetchProjectAssets', context, {});
+      if (!allAssetsRes.ok) return { success: false, message: allAssetsRes.error.message };
+      const allAssets = allAssetsRes.data as Asset[];
+      const canonAssets = allAssets.filter(a => {
+        return isCanonLike(a) && a.status !== 'deprecated';
+      });
+      
       const latestCanon = pickLatestNonDeprecated(canonAssets);
 
       const canon = focusedCanon ?? latestCanon;
       if (!canon) {
         return {
           success: true,
-          message: 'No canon found yet. Type /extract-canon first (or ask me to extract canon from your story).',
+          message: 'No canon document found. Please select one or ask me to extract one.',
         };
       }
 
@@ -683,45 +796,57 @@ export const updateCanonSkill: Skill = {
         if (directionData && Object.keys(directionData).length > 0) {
           // User has provided explicit field values; generate proposal directly
           const current = canonContent(canon);
-          const characters = (current as any)?.characters;
-          const allanIndex = findCharacterIndexByName(characters, 'Allan');
+          const characters = (current as any)?.characters || [];
+          const charIndex = resolveTargetCharacterIndex(characters, discussion || userRequest);
           
-          if (allanIndex !== null && Array.isArray(characters)) {
+          if (charIndex !== null && Array.isArray(characters)) {
             const patch: JsonPatchOperation[] = [];
-            const allan = (characters as any[])[allanIndex];
+            const targetChar = (characters as any[])[charIndex];
             const existingAppearance =
-              allan && typeof allan === 'object' && (allan as any).appearance && typeof (allan as any).appearance === 'object' && !Array.isArray((allan as any).appearance)
-                ? (allan as any).appearance
+              targetChar && typeof targetChar === 'object' && (targetChar as any).appearance && typeof (targetChar as any).appearance === 'object' && !Array.isArray((targetChar as any).appearance)
+                ? (targetChar as any).appearance
                 : null;
             
             if (!existingAppearance) {
-              patch.push({ op: 'add', path: `/characters/${allanIndex}/appearance`, value: {} });
+              patch.push({ op: 'add', path: `/characters/${charIndex}/appearance`, value: {} });
             }
             
             // Apply user-provided values directly
             for (const [key, value] of Object.entries(directionData)) {
-              patch.push({ op: 'add', path: `/characters/${allanIndex}/appearance/${key}`, value });
+              patch.push({ op: 'add', path: `/characters/${charIndex}/appearance/${key}`, value });
             }
             
             const fieldsList = Object.keys(directionData).join(', ');
-            const proposal = {
-              kind: 'asset_patch' as const,
-              assetId: canon.id,
-              baseAssetVersionId: canon.current_asset_version_id ?? null,
-              summary: `Update canon: ${canon.title ?? canon.id.slice(0, 8)}`,
-              patch,
-              metadata: {
-                applyStrategy: 'canon_update',
-                canonAssetId: canon.id,
-              },
-            };
             
-            return {
-              success: true,
-              message: `I've prepared Allan's appearance updates (${fieldsList}). Type /review to preview, then /apply to save.`,
-              proposal,
-              data: { canonAssetId: canon.id, patch, intentMode },
-            };
+            // Apply normalization to catch index mismatches even in direction mode
+            const finalPatch = normalizeCanonPatch({ 
+              patch, 
+              current, 
+              userRequest, 
+              discussion: discussion || userRequest 
+            });
+
+             const charName = getCharacterName(characters[charIndex]) || 'character';
+             const characterNames = (characters as any[]).map(c => getCharacterName(c));
+             const proposal = {
+               kind: 'asset_patch' as const,
+               assetId: canon.id,
+               baseAssetVersionId: canon.current_asset_version_id ?? null,
+               summary: `Update ${charName} in ${canon.title || 'Canon Document'}`,
+               patch: finalPatch,
+               metadata: {
+                 applyStrategy: 'canon_update',
+                 canonAssetId: canon.id,
+                 characterNames,
+               },
+             };
+             
+             return {
+               success: true,
+               message: `I've prepared ${charName}'s appearance updates (${fieldsList}) in the document "${canon.title || 'Canon'}". Type /review to preview, then /apply to save.`,
+               proposal,
+               data: { canonAssetId: canon.id, patch: finalPatch, intentMode },
+             };
           }
         }
       }
@@ -744,43 +869,55 @@ export const updateCanonSkill: Skill = {
         if (correctionData && Object.keys(correctionData).length > 0) {
           const current = canonContent(canon);
           const characters = (current as any)?.characters;
-          const allanIndex = findCharacterIndexByName(characters, 'Allan');
+          const charIndex = resolveTargetCharacterIndex(characters, discussion || userRequest);
           
-          if (allanIndex !== null && Array.isArray(characters)) {
+          if (charIndex !== null && Array.isArray(characters)) {
             const patch: JsonPatchOperation[] = [];
-            const allan = (characters as any[])[allanIndex];
+            const targetChar = (characters as any[])[charIndex];
             const existingAppearance =
-              allan && typeof allan === 'object' && (allan as any).appearance && typeof (allan as any).appearance === 'object' && !Array.isArray((allan as any).appearance)
-                ? (allan as any).appearance
+              targetChar && typeof targetChar === 'object' && (targetChar as any).appearance && typeof (targetChar as any).appearance === 'object' && !Array.isArray((targetChar as any).appearance)
+                ? (targetChar as any).appearance
                 : null;
             
             if (!existingAppearance) {
-              patch.push({ op: 'add', path: `/characters/${allanIndex}/appearance`, value: {} });
+              patch.push({ op: 'add', path: `/characters/${charIndex}/appearance`, value: {} });
             }
             
             for (const [key, value] of Object.entries(correctionData)) {
-              patch.push({ op: 'add', path: `/characters/${allanIndex}/appearance/${key}`, value });
+              patch.push({ op: 'add', path: `/characters/${charIndex}/appearance/${key}`, value });
             }
             
             const fieldsList = Object.keys(correctionData).join(', ');
-            const proposal = {
-              kind: 'asset_patch' as const,
-              assetId: canon.id,
-              baseAssetVersionId: canon.current_asset_version_id ?? null,
-              summary: `Update canon: ${canon.title ?? canon.id.slice(0, 8)}`,
-              patch,
-              metadata: {
-                applyStrategy: 'canon_update',
-                canonAssetId: canon.id,
-              },
-            };
             
-            return {
-              success: true,
-              message: `Understood—I've adjusted Allan's ${fieldsList}. Type /review to preview, then /apply to save.`,
-              proposal,
-              data: { canonAssetId: canon.id, patch, intentMode },
-            };
+            // Apply normalization
+            const finalPatch = normalizeCanonPatch({ 
+              patch, 
+              current, 
+              userRequest, 
+              discussion: discussion || userRequest 
+            });
+
+             const charName = getCharacterName(characters[charIndex]) || 'character';
+             const characterNames = (characters as any[]).map(c => getCharacterName(c));
+             const proposal = {
+               kind: 'asset_patch' as const,
+               assetId: canon.id,
+               baseAssetVersionId: canon.current_asset_version_id ?? null,
+               summary: `Update ${charName} in ${canon.title || 'Canon Document'}`,
+               patch: finalPatch,
+               metadata: {
+                 applyStrategy: 'canon_update',
+                 canonAssetId: canon.id,
+                 characterNames,
+               },
+             };
+             
+             return {
+               success: true,
+               message: `Understood—I've adjusted ${charName}'s ${fieldsList} in the document "${canon.title || 'Canon'}". Type /review to preview, then /apply to save.`,
+               proposal,
+               data: { canonAssetId: canon.id, patch: finalPatch, intentMode },
+             };
           }
         }
         // If correction mode was detected but no valid data extracted, signal it to draft mode
@@ -790,18 +927,19 @@ export const updateCanonSkill: Skill = {
       // Draft mode: keep chat smooth (no strict schema). We only compile a patch on /review or /apply.
       if (!isCompile) {
         const current = canonContent(canon);
-        const allanIndex = findCharacterIndexByName((current as any)?.characters, 'Allan');
-        const allan =
-          allanIndex !== null && Array.isArray((current as any)?.characters)
-            ? (current as any).characters[allanIndex]
-            : null;
-        const currentAllan = allan && typeof allan === 'object' ? JSON.stringify(allan, null, 2).slice(0, 1400) : '';
+        const characters = (current as any)?.characters || [];
+        const charIndex = resolveTargetCharacterIndex(characters, userRequest);
+        const targetChar = characters[charIndex] || null;
+        const charName = targetChar ? (getCharacterName(targetChar) || 'character') : 'character';
+        const currentCharData = targetChar && typeof targetChar === 'object' ? JSON.stringify(targetChar, null, 2).slice(0, 1400) : '';
 
         // If the user asks to update specific appearance fields, respond only with those fields.
         const requestedKeys = detectRequestedAppearanceKeys(userRequest);
+        const isSuggestion = /\b(suggest|recommend|how|why|ideas|what)\b/i.test(userRequest);
         const wantsSpecificFields =
           requestedKeys.length > 0 &&
-          (/\b(fill|suggest|provide|update|set|change)\b/i.test(userRequest) ||
+          !isSuggestion &&
+          (/\b(fill|provide|update|set|change)\b/i.test(userRequest) ||
             /\b(only|just|just these|only these)\b/i.test(userRequest) ||
             /\bappearance\b/i.test(userRequest));
 
@@ -811,7 +949,7 @@ export const updateCanonSkill: Skill = {
           'Goals:',
           '- Discuss changes conversationally.',
           wantsSpecificFields
-            ? `- The user asked to update specific fields for Allan: ${requestedKeys.join(', ')}.`
+            ? `- The user asked to update specific fields for ${charName}: ${requestedKeys.join(', ')}.`
             : '- Summarize the intended canon edits as short bullet points.',
           wantsSpecificFields
             ? '- Provide only the requested fields as key/value lines (no other text).'
@@ -832,7 +970,7 @@ export const updateCanonSkill: Skill = {
           wantsSpecificFields ? '- Do NOT rewrite the full description.' : '',
           '',
           `CURRENT_CANON_ASSET_ID: ${canon.id}`,
-          currentAllan ? `\nCURRENT_ALLAN:\n${currentAllan}\n` : '',
+          currentCharData ? `\nCURRENT_CHARACTER_DETAILS:\n${currentCharData}\n` : '',
           `USER_REQUEST:\n${userRequest}\n`,
           discussion ? `DISCUSSION_CONTEXT:\n${discussion.slice(0, 1800)}\n` : '',
           'Assistant:',
@@ -842,30 +980,28 @@ export const updateCanonSkill: Skill = {
 
         const model =
           (import.meta.env.VITE_COPILOT_MODEL as string | undefined) ||
-          'gemma3:1b';
+          'gemma4:e2b';
         const llmRes = await executeTool('llmGenerateText', context, { model, prompt: chatPrompt, stream: false });
         const assistantReplyRaw = llmRes.ok ? String((llmRes.data as any)?.text ?? '').trim() : '';
         const assistantReply = wantsSpecificFields
           ? (() => {
-              const parsed = extractAppearanceKeyValues(assistantReplyRaw);
-              const fallbackText = buildAppearanceFallbackLines({ requestedKeys, allan, discussionText: discussion });
+              const parsedFromUser = extractAppearanceKeyValues(userRequest);
+              const parsedFromAssistant = extractAppearanceKeyValues(assistantReplyRaw);
+              const fallbackText = isSuggestion ? '' : buildAppearanceFallbackLines({ requestedKeys, character: targetChar, discussionText: discussion });
               const fallback = extractAppearanceKeyValues(fallbackText);
               
-              // Build the final output with only requested keys, falling back to generated suggestions
               const lines = requestedKeys
                 .map(k => {
-                  const v = parsed[k] || fallback[k] || '';
+                  // Priority: User > Assistant > Fallback
+                  const v = parsedFromUser[k] || parsedFromAssistant[k] || fallback[k] || '';
                   return isMeaningfulFieldValue(v) ? `${k}: ${v}` : '';
                 })
                 .filter(Boolean);
               
-              // If we got some lines from parsing, use them; otherwise use the fallback text or raw response
               if (lines.length > 0) {
                 return lines.join('\n');
               }
-              
-              // Fallback: use the generated suggestions
-              return fallbackText || assistantReplyRaw;
+              return assistantReplyRaw;
             })()
           : assistantReplyRaw;
         const msg =
@@ -888,6 +1024,7 @@ export const updateCanonSkill: Skill = {
 
       // 3) Ask the model for a patch (strict JSON).
       const current = canonContent(canon);
+      const characters = (current as any)?.characters || [];
 
       // If the request is clearly about specific appearance fields, compile a deterministic field-only patch
       // from the discussion transcript (which contains the assistant's suggested key/value lines).
@@ -905,60 +1042,67 @@ export const updateCanonSkill: Skill = {
           /\bappearance\b/i.test(requestWindow));
 
       if (wantsSpecificFields) {
-        const characters = (current as any)?.characters;
-        const allanIndex = findCharacterIndexByName(characters, 'Allan');
-        const allan =
-          allanIndex !== null && Array.isArray(characters)
-            ? (characters as any[])[allanIndex]
-            : null;
+        const charIndex = resolveTargetCharacterIndex(characters, discussion || userRequest);
+        const targetChar = charIndex !== null && Array.isArray(characters) ? (characters as any[])[charIndex] : null;
         const suggested = extractAppearanceKeyValues(discussion || '');
-        const fallbackText = buildAppearanceFallbackLines({ requestedKeys, allan, discussionText: discussion });
+        const override = extractAppearanceKeyValues(userRequest);
+        const fallbackText = buildAppearanceFallbackLines({ requestedKeys, character: targetChar, discussionText: discussion });
         const fallback = extractAppearanceKeyValues(fallbackText);
         const picked: Partial<Record<keyof CanonCharacterAppearance, string>> = {};
         for (const k of requestedKeys) {
-          const v = suggested[k] || fallback[k];
+          // Priority: User Request Override > Suggested in Discussion > Fallback
+          const v = override[k] || suggested[k] || fallback[k];
           if (typeof v === 'string' && isMeaningfulFieldValue(v)) picked[k] = v;
         }
 
-        if (allanIndex !== null && Object.keys(picked).length > 0) {
+        if (charIndex !== null && Object.keys(picked).length > 0) {
           const patch: JsonPatchOperation[] = [];
           const existingAppearance =
-            allan && typeof allan === 'object' && (allan as any).appearance && typeof (allan as any).appearance === 'object' && !Array.isArray((allan as any).appearance)
-              ? (allan as any).appearance
+            targetChar && typeof targetChar === 'object' && (targetChar as any).appearance && typeof (targetChar as any).appearance === 'object' && !Array.isArray((targetChar as any).appearance)
+              ? (targetChar as any).appearance
               : null;
           if (!existingAppearance) {
-            patch.push({ op: 'add', path: `/characters/${allanIndex}/appearance`, value: {} });
+            patch.push({ op: 'add', path: `/characters/${charIndex}/appearance`, value: {} });
           }
           for (const [k, v] of Object.entries(picked)) {
             // Use "add" so it works whether the field exists yet or not.
-            patch.push({ op: 'add', path: `/characters/${allanIndex}/appearance/${k}`, value: v });
+            patch.push({ op: 'add', path: `/characters/${charIndex}/appearance/${k}`, value: v });
           }
+
+          const finalPatch = normalizeCanonPatch({ 
+            patch, 
+            current, 
+            userRequest: '/review', 
+            discussion: (discussion || '') + '\n' + userRequest 
+          });
 
           const proposal = {
             kind: 'asset_patch' as const,
             assetId: canon.id,
             baseAssetVersionId: canon.current_asset_version_id ?? null,
             summary: `Update canon: ${canon.title ?? canon.id.slice(0, 8)}`,
-            patch,
+            patch: finalPatch,
             metadata: {
               applyStrategy: 'canon_update',
               canonAssetId: canon.id,
             },
           };
+          const charName = getCharacterName(characters[charIndex]) || 'character';
           return {
             success: true,
-            message: `Drafted canon updates for Allan (${requestedKeys.join(', ')}). Type /review to preview the proposal, then /apply to save it.`,
+            message: `Drafted canon updates for ${charName} (${requestedKeys.join(', ')}). Type /review to preview the proposal, then /apply to save it.`,
             proposal,
-            data: { canonAssetId: canon.id, patch },
+            data: { canonAssetId: canon.id, patch: finalPatch },
           };
         }
       }
 
-      // Fast-path: if the user explicitly wants to update Allan (common case),
-      // avoid patching the wrong character by generating a deterministic Allan-only patch.
-      if (explicitlyTargetsAllan(userRequest)) {
+      // Fast-path: if the user explicitly wants to update a single character,
+      // avoid patching the wrong character by generating a deterministic patch.
+      const target = explicitlyTargetsSingleCharacter(userRequest, characters);
+      if (target) {
         const sourceText = discussion?.trim() ? discussion : userRequest;
-        const deterministic = buildDeterministicAllanPatch({ current, discussion: sourceText });
+        const deterministic = buildDeterministicCharacterPatch({ current, discussion: sourceText });
         if (deterministic?.length) {
           const proposal = {
             kind: 'asset_patch' as const,
@@ -971,10 +1115,12 @@ export const updateCanonSkill: Skill = {
               canonAssetId: canon.id,
             },
           };
+          const charIndex = resolveTargetCharacterIndex(characters, discussion || userRequest);
+          const charName = charIndex !== null ? (getCharacterName(characters[charIndex]) || 'character') : 'character';
           return {
             success: true,
             message:
-              'Drafted canon updates for Allan. Type /review to preview the proposal, then /apply to save it as a new canon version.',
+              `Drafted canon updates for ${charName}. Type /review to preview the proposal, then /apply to save it as a new canon version.`,
             proposal,
             data: { canonAssetId: canon.id, patch: deterministic },
           };
@@ -999,7 +1145,7 @@ export const updateCanonSkill: Skill = {
       const model =
         (import.meta.env.VITE_COPILOT_CANON_MODEL as string | undefined) ||
         (import.meta.env.VITE_COPILOT_MODEL as string | undefined) ||
-        'gemma3:1b';
+        'gemma4:e2b';
 
       const llmRes = await executeTool('llmGenerateText', context, { model, prompt, stream: false });
       if (!llmRes.ok) return { success: false, message: llmRes.error.message };
@@ -1014,7 +1160,7 @@ export const updateCanonSkill: Skill = {
           (import.meta.env.VITE_COPILOT_PLANNER_MODEL as string | undefined) ||
           (import.meta.env.VITE_COPILOT_CANON_MODEL as string | undefined) ||
           (import.meta.env.VITE_COPILOT_MODEL as string | undefined) ||
-          'gemma3:1b';
+          'gemma4:e2b';
         const repairPrompt = buildJsonRepairPrompt({
           invalidOutput: raw.slice(0, 8000),
           error: err instanceof Error ? err.message : String(err),
@@ -1045,7 +1191,7 @@ export const updateCanonSkill: Skill = {
           (import.meta.env.VITE_COPILOT_PLANNER_MODEL as string | undefined) ||
           (import.meta.env.VITE_COPILOT_CANON_MODEL as string | undefined) ||
           (import.meta.env.VITE_COPILOT_MODEL as string | undefined) ||
-          'gemma3:1b';
+          'gemma4:e2b';
         const repairPrompt = buildJsonRepairPrompt({ invalidOutput: raw.slice(0, 8000), error: 'Schema validation failed' });
         const repairRes = await executeTool('llmGenerateText', context, { model: repairModel, prompt: repairPrompt, stream: false });
         if (!repairRes.ok) {
@@ -1113,11 +1259,17 @@ export const updateCanonSkill: Skill = {
 
       // Deterministic fixups for common failure modes (wrong character index, wrong types).
       let finalPatch = normalizeCanonPatch({ patch, current, userRequest, discussion });
-      if (looksLikeUserOnlyMentionsAllan(userRequest)) {
-        // If the model didn't produce an Allan-specific patch (or produced an empty/unsafe one), prefer deterministic patch.
-        const touchesAllan = finalPatch.some(op => String((op as any)?.path ?? '').includes('/characters/') && /allan/i.test(JSON.stringify((op as any).value ?? '')));
-        if (!finalPatch.length || (Array.isArray((current as any).characters) && !touchesAllan)) {
-          const deterministic = buildDeterministicAllanPatch({ current, discussion });
+      const singleTarget = explicitlyTargetsSingleCharacter(userRequest, characters);
+      if (singleTarget) {
+        // If the model didn't produce a patch targeting the intended character, prefer deterministic patch.
+        const touchesTarget = finalPatch.some(op => String((op as any)?.path ?? '').includes(`/characters/${singleTarget.index}`));
+        if (!finalPatch.length || !touchesTarget) {
+          const deterministic = buildDeterministicCharacterPatch({ current, discussion });
+          if (deterministic) finalPatch = deterministic;
+        }
+      } else if (looksLikeUserOnlyMentionsSingleCharacter(userRequest, characters)) {
+        if (!finalPatch.length) {
+          const deterministic = buildDeterministicCharacterPatch({ current, discussion });
           if (deterministic) finalPatch = deterministic;
         }
       }

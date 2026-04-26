@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { Routes, Route } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Shell } from './components/layout';
@@ -14,6 +15,8 @@ import { ActivityPage } from './pages/ActivityPage/ActivityPage';
 import { TimelinePage } from './pages/TimelinePage/TimelinePage';
 import { DiffViewer } from './components/diff/DiffViewer';
 import { useProjectSync } from './hooks/useProjectSync';
+import { useAppStore } from './stores';
+import { fetchHealth } from './lib/api';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -25,6 +28,22 @@ const queryClient = new QueryClient({
 });
 
 export function App() {
+  const { setConnectionStatus } = useAppStore();
+
+  useEffect(() => {
+    const check = async () => {
+      try {
+        await fetchHealth();
+        setConnectionStatus('connected');
+      } catch {
+        setConnectionStatus('disconnected');
+      }
+    };
+    void check();
+    const timer = setInterval(check, 10000);
+    return () => clearInterval(timer);
+  }, [setConnectionStatus]);
+
   return (
     <QueryClientProvider client={queryClient}>
       <Shell>

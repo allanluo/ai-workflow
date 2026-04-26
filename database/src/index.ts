@@ -11,3 +11,5 @@ export * from './links.js';
 export * from './copilot.js';
 export * from './copilotPlanRuns.js';
 export * from './copilotVectorIndex.js';
+
+export { eq, and, or, desc, asc } from 'drizzle-orm';

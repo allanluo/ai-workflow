@@ -45,7 +45,7 @@ export async function createExecutionPlan(input: {
 }): Promise<{ ok: true; plan: ExecutionPlan } | { ok: false; error: string; raw?: string }> {
   const model = (import.meta.env.VITE_COPILOT_PLANNER_MODEL as string | undefined) ||
     (import.meta.env.VITE_COPILOT_MODEL as string | undefined) ||
-    'gemma3:1b';
+    'gemma4:e2b';
 
   const tools = listTools();
   const toolList = tools

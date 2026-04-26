@@ -80,6 +80,8 @@ export async function generateSpeech(request: TTSGenerateRequest): Promise<TTSGe
 
 export interface ImageGenerateRequest {
   prompt: string;
+  positive_prompt?: string;
+  negative_prompt?: string;
   workflow?: string;
   width?: number;
   height?: number;
@@ -96,9 +98,13 @@ export interface ImageGenerateResponse {
 }
 
 export async function generateImage(request: ImageGenerateRequest): Promise<ImageGenerateResponse> {
+  const payload = {
+    ...request,
+    positive_prompt: request.positive_prompt ?? request.prompt,
+  };
   return apiFetch<ImageGenerateResponse>("/api/image/generate", {
     method: "POST",
-    body: JSON.stringify(request)
+    body: JSON.stringify(payload)
   });
 }
 

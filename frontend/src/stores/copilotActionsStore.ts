@@ -5,18 +5,22 @@ type PendingShotImageGeneration = {
   projectId: string;
   shotId: string;
   prompt: string;
-  negativePrompt?: string;
+  negative_prompt?: string;
   width: number;
   height: number;
 };
 
 interface CopilotActionsState {
+  promptInput: string;
+  setPromptInput: (input: string) => void;
   pendingShotImageGeneration: PendingShotImageGeneration | null;
   requestShotImageGeneration: (input: Omit<PendingShotImageGeneration, 'requestId'>) => void;
   clearPendingShotImageGeneration: () => void;
 }
 
 export const useCopilotActionsStore = create<CopilotActionsState>()(set => ({
+  promptInput: '',
+  setPromptInput: (input) => set({ promptInput: input }),
   pendingShotImageGeneration: null,
   requestShotImageGeneration: input =>
     set({

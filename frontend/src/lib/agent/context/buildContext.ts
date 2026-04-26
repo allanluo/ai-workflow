@@ -100,6 +100,21 @@ function parseWorkflowRunIdFromNodeRunSnippet(content: string) {
   return m?.[1] ? String(m[1]).trim() : null;
 }
 
+export const isCanonLike = (asset: any) => {
+  if (asset.asset_type === 'canon_text') return true;
+  const content = asset.current_version?.content;
+  if (!content || typeof content !== 'object') return false;
+  return Boolean(
+    (content as any).summary ||
+    (content as any).characters ||
+    (content as any).locations ||
+    (content as any).themes ||
+    (content as any).world_rules ||
+    (content as any).environment_lock ||
+    (content as any).character_table
+  );
+};
+
 export async function buildDeterministicCopilotContext(input: BuildContextInput): Promise<CopilotContext> {
   const { skillContext, selection, query = '' } = input;
 
@@ -141,7 +156,7 @@ export async function buildDeterministicCopilotContext(input: BuildContextInput)
   // - include @mentioned items
   // - include latest canon, scenes batch, shot plan
   // - keyword + semantic ranking on assets/workflows
-  const latestCanon = pickLatestNonDeprecated(assets.filter(a => a.asset_type === 'canon_text'));
+  const latestCanon = pickLatestNonDeprecated(assets.filter(a => isCanonLike(a)));
   const latestScenes = pickLatestNonDeprecated(
     assets.filter(a => a.asset_type === 'scene').filter(a => {
       const c = a.current_version?.content as any;

@@ -7,6 +7,7 @@ import {
 } from '../../shotPlanEditing';
 import { extractFirstJsonObjectLenient } from '../llmClient';
 import { executeTool } from '../tools';
+import { isCanonLike } from '../context/buildContext';
 
 export type ShotPromptSuggestion = {
   prompt_structured: string;
@@ -71,13 +72,28 @@ function buildCanonSummary(canonAsset: Asset | null, shotText: string) {
     .map(c => {
       const name = typeof c.name === 'string' ? c.name.trim() : '';
       const description = typeof c.description === 'string' ? c.description.trim() : '';
-      const appearance = Array.isArray(c.appearance)
-        ? (c.appearance as unknown[])
-            .filter(v => typeof v === 'string')
-            .map(v => (v as string).trim())
-            .filter(Boolean)
-            .slice(0, 6)
-        : [];
+      let appearance: string[] = [];
+      const app = c.appearance;
+      if (Array.isArray(app)) {
+        appearance = app.filter(v => typeof v === 'string').map(v => (v as string).trim()).filter(Boolean).slice(0, 6);
+      } else if (app && typeof app === 'object') {
+        appearance = Object.entries(app as Record<string, unknown>)
+          .map(([k, v]) => (typeof v === 'string' && v.trim() ? `${k}: ${v.trim()}` : ''))
+          .filter(Boolean);
+      } else if (typeof app === 'string' && app.trim()) {
+        appearance = [app.trim()];
+      }
+
+      if (appearance.length === 0) {
+        const legacyKeys = ['facial_features', 'face', 'hair', 'dress', 'clothing', 'shoes', 'hat', 'accessories'] as const;
+        appearance = legacyKeys
+          .map(k => (typeof c[k] === 'string' && (c[k] as string).trim() ? `${k}: ${(c[k] as string).trim()}` : null))
+          .filter(Boolean) as string[];
+      }
+
+      if (appearance.length === 0 && typeof c.character_image === 'string' && c.character_image.trim()) {
+        appearance = [c.character_image.trim()];
+      }
       return { name, description, appearance };
     })
     .filter(c => c.name || c.description || c.appearance.length);
@@ -125,7 +141,7 @@ function buildSceneSummary(sceneBatchAsset: Asset | null, sceneTitle: string) {
 
   const title = typeof match.title === 'string' ? match.title.trim() : '';
   const setting = typeof match.setting === 'string' ? match.setting.trim() : '';
-  const emotionalBeat =
+  const emotional_beat =
     typeof match.emotionalBeat === 'string'
       ? match.emotionalBeat.trim()
       : typeof match.emotional_beat === 'string'
@@ -136,7 +152,7 @@ function buildSceneSummary(sceneBatchAsset: Asset | null, sceneTitle: string) {
   lines.push('SCENE:');
   if (title) lines.push(`  title: ${title}`);
   if (setting) lines.push(`  setting: ${setting}`);
-  if (emotionalBeat) lines.push(`  emotional_beat: ${emotionalBeat}`);
+  if (emotional_beat) lines.push(`  emotional_beat: ${emotional_beat}`);
   if (lines.length === 1) lines.push('  (none)');
   return lines.join('\n');
 }
@@ -185,7 +201,8 @@ function violatesFramingIntent(intent: FramingIntent, suggestion: ShotPromptSugg
   if (intent === 'wide' || intent === 'bird_eye') {
     if (/\b(close[\s-]?up|portrait|head[\s-]?shot)\b/.test(prompt)) return true;
     // If we talk about a face as the main subject, it usually implies a tight shot.
-    if (/\b(allan['’]s\s+face|focus on.*eyes|close on.*eyes)\b/.test(prompt)) return true;
+    if (/\b(focus on.*eyes|close on.*eyes)\b/.test(prompt)) return true;
+    if (/\b(face|eyes)\s*(?:close[\s-]?up|portrait|detail)\b/.test(prompt)) return true;
   }
   return false;
 }
@@ -213,7 +230,9 @@ function composeFallbackSuggestion(input: {
   sceneSummary: string;
   shotSummary: string;
   userFeedback: string;
+  characterName: string;
 }) : ShotPromptSuggestion {
+  const subjectName = input.characterName || 'the subject';
   const baseIntent =
     input.intent === 'bird_eye'
       ? 'Bird-eye wide establishing shot'
@@ -229,8 +248,8 @@ function composeFallbackSuggestion(input: {
     'SHOT_PROMPT_STRUCTURED:',
     `- framing: ${baseIntent}`,
     `- scene: ${input.sceneTitle || '(unknown)'}`,
-    '- subject: Allan, partially hidden behind tall grass in the foreground',
-    '- action: Allan is scared, watching distant gunfire exchanging between two groups far away',
+    `- subject: ${subjectName}, partially hidden behind elements in the foreground`,
+    `- action: ${subjectName} is alert, watching the environment carefully`,
     '- scale: distant figures are very small due to distance; focus on environment + mood, not faces',
     `- setting_notes: ${input.sceneSummary || '(see scene)'}`,
     `- shot_notes: ${input.shotSummary || '(see shot)'}`,
@@ -240,10 +259,10 @@ function composeFallbackSuggestion(input: {
   ].join('\n');
 
   const prompt = [
-    `${baseIntent} in a grassland at dusk/overcast.`,
-    `Allan is crouched/hiding behind tall grass in the foreground, visibly scared, watching a distant firefight.`,
-    `Two small groups of people exchange gunfire far away; the figures are tiny silhouettes due to the distance.`,
-    `Emphasize vast landscape, depth, and tension; Allan should NOT be a close-up or face-focused portrait.`,
+    `${baseIntent} in the setting defined by the scene.`,
+    `${subjectName} is positioned within the environment, partially obscured by foreground elements.`,
+    `The focus is on the atmosphere, depth, and the relationship between ${subjectName} and the surrounding world.`,
+    `Emphasize vast landscape, depth, and tension; ${subjectName} should NOT be a close-up or face-focused portrait unless explicitly requested.`,
     `No text, no watermark, no logos.`,
   ].join(' ');
 
@@ -280,6 +299,7 @@ function buildSystemPrompt() {
     '- Do NOT change shot scale (e.g. wide vs close-up) unless the user explicitly asks.',
     '- The prompt must be visually specific, cinematic, and include camera/framing/angle/motion.',
     '- Always include: no text, no watermark, no logos.',
+    '- If USER_FEEDBACK asks to remove or exclude an object (like a gun or weapon), you MUST add it to the "negative_prompt" (e.g. "gun, weapon, holding weapon").',
     '- Keep it consistent with the setting and emotional beat.',
     '- If key info is missing, ask 1-3 concise questions in "questions" (do not ask more).',
     '- If USER_FEEDBACK provides explicit framing/composition, treat it as authoritative and apply it (do not ask again).',
@@ -339,13 +359,12 @@ export const improveShotPromptSkill: Skill = {
       }
       const planAsset = planAssetResult.data as Asset;
 
-      const canonAssetsResult = await executeTool('fetchProjectAssets', context, {
-        assetType: 'canon_text',
-      });
-      if (!canonAssetsResult.ok) {
-        return { success: false, message: canonAssetsResult.error.message };
+      const allAssetsResult = await executeTool('fetchProjectAssets', context, {});
+      if (!allAssetsResult.ok) {
+        return { success: false, message: allAssetsResult.error.message };
       }
-      const canonAssets = canonAssetsResult.data as Asset[];
+      const allAssets = allAssetsResult.data as Asset[];
+      const canonAssets = allAssets.filter(a => isCanonLike(a));
 
       const sceneAssetsResult = await executeTool('fetchProjectAssets', context, { assetType: 'scene' });
       if (!sceneAssetsResult.ok) {
@@ -410,7 +429,7 @@ export const improveShotPromptSkill: Skill = {
       const model =
         (import.meta.env.VITE_COPILOT_SHOT_PROMPT_MODEL as string | undefined) ||
         (import.meta.env.VITE_COPILOT_MODEL as string | undefined) ||
-        'gemma3:1b';
+        'gemma4:e2b';
 
       const fullPrompt = `${buildSystemPrompt()}\n\nCONTEXT:\n${contextBlock}\n\nJSON:`;
       const llmRes = await executeTool('llmGenerateText', context, { model, prompt: fullPrompt, stream: false });
@@ -431,7 +450,7 @@ export const improveShotPromptSkill: Skill = {
         const repairModel =
           (import.meta.env.VITE_COPILOT_PLANNER_MODEL as string | undefined) ||
           (import.meta.env.VITE_COPILOT_MODEL as string | undefined) ||
-          'gemma3:1b';
+          'gemma4:e2b';
         const repairRes = await executeTool('llmGenerateText', context, { model: repairModel, prompt: repairPrompt, stream: false });
         if (!repairRes.ok) {
           return {
@@ -501,12 +520,24 @@ export const improveShotPromptSkill: Skill = {
       if (violatesFramingIntent(framingIntent, suggestion)) {
         const sceneSummary = buildSceneSummary(latestSceneBatch, sceneTitle);
         const shotSummary = buildShotSummary({ sceneTitle, framing, angle, motion, description, negative });
+        
+        // Find a representative character name from the context
+        const charactersInCanon = Array.isArray(latestCanon?.current_version?.content?.characters) 
+          ? latestCanon.current_version.content.characters as any[] 
+          : [];
+        const charMatch = charactersInCanon.find(c => 
+          (typeof c?.name === 'string' && shotText.toLowerCase().includes(c.name.toLowerCase())) ||
+          (typeof c?.description === 'string' && shotText.toLowerCase().includes(c.description.toLowerCase()))
+        );
+        const charName = typeof charMatch?.name === 'string' ? charMatch.name : '';
+
         suggestion = composeFallbackSuggestion({
           intent: framingIntent,
           sceneTitle,
           sceneSummary,
           shotSummary,
           userFeedback,
+          characterName: charName,
         });
       }
 
