@@ -15,7 +15,6 @@ const defaultTabsByPage: Record<string, string> = {
   scenes: 'copilot',
   shots: 'copilot',
   workflows: 'inspector',
-  outputs: 'copilot',
   timeline: 'copilot',
   review: 'copilot',
   activity: 'copilot',

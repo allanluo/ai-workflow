@@ -192,6 +192,20 @@ export async function embedTextWithFallback(input: {
   }
 
   const errors: string[] = [];
+  const networkErrors: string[] = [];
+
+  const looksLikeNetworkFailure = (message: string) => {
+    const m = (message || '').toLowerCase();
+    return (
+      m.includes('fetch failed') ||
+      m.includes('econnrefused') ||
+      m.includes('enotfound') ||
+      m.includes('etimedout') ||
+      m.includes('socket') ||
+      m.includes('network') ||
+      m.includes('request timeout')
+    );
+  };
 
   for (const candidate of candidates) {
     const modelName = available ? resolveModelName(candidate, available) : candidate;
@@ -203,6 +217,9 @@ export async function embedTextWithFallback(input: {
       const missingEndpoint = Boolean((err as any)?.missingEmbeddingsEndpoint);
       const message = err instanceof Error ? err.message : String(err);
       errors.push(`${modelName}: ${message}`);
+      if (looksLikeNetworkFailure(message)) {
+        networkErrors.push(`${modelName}: ${message}`);
+      }
       if (!allowFallback) break;
       if (missingEndpoint) {
         // If the API doesn't have embeddings at all, use deterministic hashed embeddings instead.
@@ -213,6 +230,14 @@ export async function embedTextWithFallback(input: {
   }
 
   const detail = errors.slice(0, 5).join(' | ');
+
+  // Best-effort: if the server is reachable for embeddings, we still prefer "real" embeddings. But if
+  // every candidate failed due to network errors, fall back to deterministic hashed embeddings so
+  // vector indexing does not spam logs or break unrelated actions.
+  if (allowFallback && networkErrors.length > 0 && networkErrors.length === errors.length) {
+    return { model: HASH_EMBEDDING_MODEL, embedding: embedTextHashed(input.text) };
+  }
+
   throw new Error(
     `Embedding failed. Set DEFAULT_EMBEDDING_MODEL to an embedding-capable model supported by your LLM server. Details: ${detail}`
   );

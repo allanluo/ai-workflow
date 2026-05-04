@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import { useDraftStore } from './draftStore';
+import { useSelectionStore } from './selectionStore';
 
 export type PageId =
   | 'home'
@@ -8,7 +10,6 @@ export type PageId =
   | 'scenes'
   | 'shots'
   | 'workflows'
-  | 'outputs'
   | 'timeline'
   | 'review'
   | 'activity'
@@ -26,6 +27,7 @@ interface AppState {
   connectionStatus: ConnectionStatus;
   sidebarCollapsed: boolean;
   projectPickerOpen: boolean;
+  createProjectModalOpen: boolean;
 }
 
 interface AppActions {
@@ -37,11 +39,13 @@ interface AppActions {
   setSidebarCollapsed: (collapsed: boolean) => void;
   openProjectPicker: () => void;
   closeProjectPicker: () => void;
+  openCreateProjectModal: () => void;
+  closeCreateProjectModal: () => void;
 }
 
 export const useAppStore = create<AppState & AppActions>()(
   persist(
-    set => ({
+    (set, get) => ({
       currentProjectId: null,
       currentProjectTitle: null,
       selectedPage: 'home',
@@ -49,8 +53,17 @@ export const useAppStore = create<AppState & AppActions>()(
       connectionStatus: 'disconnected',
       sidebarCollapsed: false,
       projectPickerOpen: false,
+      createProjectModalOpen: false,
 
-      setCurrentProject: (id, title) => set({ currentProjectId: id, currentProjectTitle: title }),
+      setCurrentProject: (id, title) => {
+        const previousProjectId = get().currentProjectId;
+        set({ currentProjectId: id, currentProjectTitle: title });
+
+        if (previousProjectId !== id) {
+          useSelectionStore.getState().clearSelection();
+          useDraftStore.getState().setDraft(null);
+        }
+      },
       setSelectedPage: page => set({ selectedPage: page }),
       setUserMode: mode => set({ userMode: mode }),
       setConnectionStatus: status => set({ connectionStatus: status }),
@@ -58,6 +71,8 @@ export const useAppStore = create<AppState & AppActions>()(
       setSidebarCollapsed: collapsed => set({ sidebarCollapsed: collapsed }),
       openProjectPicker: () => set({ projectPickerOpen: true }),
       closeProjectPicker: () => set({ projectPickerOpen: false }),
+      openCreateProjectModal: () => set({ createProjectModalOpen: true }),
+      closeCreateProjectModal: () => set({ createProjectModalOpen: false }),
     }),
     {
       name: 'ai-workflow-app',

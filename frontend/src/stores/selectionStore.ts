@@ -14,6 +14,7 @@ interface SelectionState {
   selectedSceneId: string | null;
   selectedFileId: string | null;
   selectedWorkflowNodeId: string | null;
+  triggerExportCount: number;
 }
 
 interface SelectionActions {
@@ -104,12 +105,13 @@ export const useSelectionStore = create<SelectionState & SelectionActions>()(
           selectedAssetVersionId: null,
         }),
 
-      clearWorkflowSelection: () =>
-        set({
-          selectedWorkflowId: null,
-          selectedWorkflowVersionId: null,
-          selectedWorkflowRunId: null,
-        }),
+  clearWorkflowSelection: () =>
+    set({
+      selectedWorkflowId: null,
+      selectedWorkflowVersionId: null,
+      selectedWorkflowRunId: null,
+      selectedWorkflowNodeId: null,
+    }),
 
       clearOutputSelection: () =>
         set({

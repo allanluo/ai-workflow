@@ -11,6 +11,15 @@ export interface ExportJob {
   created_at: string;
 }
 
+export interface StoryboardExportSegment {
+  shot_id: string;
+  title?: string;
+  image_url?: string;
+  video_url?: string;
+  audio_url?: string;
+  duration_seconds?: number;
+}
+
 export function useQuickExport(projectId: string) {
   const [isExporting, setIsExporting] = useState(false);
   const [activeJob, setActiveJob] = useState<ExportJob | null>(null);
@@ -77,6 +86,62 @@ export function useQuickExport(projectId: string) {
       return res.json();
     },
   });
+
+  const createExportFromMetadata = useCallback(
+    async (input: {
+      title: string;
+      outputType?: string;
+      assembledFromAssetVersionIds?: string[];
+      metadata: Record<string, unknown>;
+      successMessage: string;
+    }) => {
+      setIsExporting(true);
+      setActiveJob(null);
+
+      try {
+        const outputRes = await createOutputMutation.mutateAsync({
+          title: input.title,
+          output_type: input.outputType ?? 'film',
+        });
+
+        const outputId = outputRes?.data?.output?.id;
+        if (!outputId) throw new Error('Failed to create output: No ID returned from backend');
+
+        const versionRes = await createOutputVersionMutation.mutateAsync({
+          outputId,
+          assembled_from_asset_version_ids: input.assembledFromAssetVersionIds ?? [],
+          metadata: input.metadata,
+        });
+
+        const outputVersionId = versionRes.data?.version?.id;
+        if (!outputVersionId) throw new Error('Failed to create output version: No ID returned');
+
+        const exportRes = await createExportMutation.mutateAsync({
+          output_version_id: outputVersionId,
+          export_format: 'mp4',
+        });
+
+        const job = exportRes.data?.job;
+        if (job) {
+          setActiveJob(job);
+        }
+
+        showToast({
+          type: 'success',
+          title: 'Export Started',
+          message: input.successMessage,
+        });
+      } catch (err) {
+        showToast({
+          type: 'error',
+          title: 'Export Failed',
+          message: err instanceof Error ? err.message : 'Unknown error occurred during export',
+        });
+        setIsExporting(false);
+      }
+    },
+    [createExportMutation, createOutputMutation, createOutputVersionMutation]
+  );
 
   const handleQuickExport = useCallback(async (selectedPlan: Asset | null) => {
     if (!selectedPlan) {
@@ -177,18 +242,15 @@ export function useQuickExport(projectId: string) {
       if (videoUrls.length === 0) {
         const msg = `No video segments found. \nStorage Key: ${storageKey}\nMedia Map Size: ${Object.keys(mediaMap).length}\nShots in Plan: ${planItems.length}\nSample IDs: ${debugIds.slice(0, 3).join(', ')}`;
         console.error('[QuickExport] Diagnostic Failure:', msg);
-        // Show a helpful alert with diagnostic info
-        window.alert(`Export Failed: ${msg}`);
+        showToast({
+          type: 'error',
+          title: 'Export Failed',
+          message:
+            'No video segments found for this shot plan. Generate videos for your shots first (Shots → Preview → Video or Image→Video), then try exporting again.',
+        });
+        setIsExporting(false);
+        return;
       }
-
-      // 3. Create a quick Output
-      const outputRes = await createOutputMutation.mutateAsync({
-        title: `Quick Export: ${selectedPlan.title || 'Untitled'}`,
-        output_type: 'film',
-      });
-      
-      const outputId = outputRes?.data?.output?.id;
-      if (!outputId) throw new Error('Failed to create output: No ID returned from backend');
 
       const assetVersionId = selectedPlan.current_asset_version_id || 
                             selectedPlan.current_version?.id || 
@@ -199,31 +261,11 @@ export function useQuickExport(projectId: string) {
         throw new Error("Cannot export: This shot plan has no version data.");
       }
 
-      // 4. Create an Output Version
-      const versionRes = await createOutputVersionMutation.mutateAsync({
-        outputId,
-        assembled_from_asset_version_ids: [assetVersionId],
+      await createExportFromMetadata({
+        title: `Quick Export: ${selectedPlan.title || 'Untitled'}`,
+        assembledFromAssetVersionIds: [assetVersionId],
         metadata: { video_urls: videoUrls },
-      });
-      
-      const outputVersionId = versionRes.data?.version?.id;
-      if (!outputVersionId) throw new Error('Failed to create output version: No ID returned');
-
-      // 5. Trigger Export
-      const exportRes = await createExportMutation.mutateAsync({
-        output_version_id: outputVersionId,
-        export_format: 'mp4',
-      });
-
-      const job = exportRes.data?.job;
-      if (job) {
-        setActiveJob(job);
-      }
-
-      showToast({
-        type: 'success',
-        title: 'Export Started',
-        message: 'Your sequence is now rendering. You can stay here to see the progress.',
+        successMessage: 'Your sequence is now rendering. You can stay here to see the progress.',
       });
     } catch (err) {
       showToast({
@@ -233,10 +275,43 @@ export function useQuickExport(projectId: string) {
       });
       setIsExporting(false);
     }
-  }, [projectId, createOutputMutation, createOutputVersionMutation, createExportMutation]);
+  }, [projectId, createExportFromMetadata]);
+
+  const handleStoryboardExport = useCallback(
+    async (input: {
+      title: string;
+      segments: StoryboardExportSegment[];
+      assembledFromAssetVersionIds?: string[];
+    }) => {
+      const segments = input.segments.filter(
+        segment => Boolean(segment.video_url || segment.image_url)
+      );
+
+      if (segments.length === 0) {
+        showToast({
+          type: 'error',
+          title: 'Export',
+          message: 'No preview media found. Generate shot images or videos first.',
+        });
+        return;
+      }
+
+      await createExportFromMetadata({
+        title: input.title,
+        assembledFromAssetVersionIds: input.assembledFromAssetVersionIds ?? [],
+        metadata: {
+          export_mode: 'narrated_preview',
+          segments,
+        },
+        successMessage: 'Narrated preview export started. The MP4 will be ready when rendering completes.',
+      });
+    },
+    [createExportFromMetadata]
+  );
 
   return {
     handleQuickExport,
+    handleStoryboardExport,
     isExporting,
     activeJob
   };

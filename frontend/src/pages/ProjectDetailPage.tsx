@@ -1,12 +1,10 @@
-import { Link } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { Link, useNavigate } from 'react-router-dom';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useProjectSync } from '../hooks/useProjectSync';
-import {
-  fetchProjectById,
-  fetchProjectAssets,
-  fetchProjectWorkflows,
-  fetchProjectWorkflowRuns,
-} from '../lib/api';
+import { deleteProject, fetchProjectById, fetchProjectAssets, fetchProjectWorkflows, fetchProjectWorkflowRuns } from '../lib/api';
+import { Button } from '../components/common';
+import { useState } from 'react';
+import { useAppStore } from '../stores';
 
 export function ProjectDetailPage() {
   const projectId = useProjectSync();
@@ -40,6 +38,25 @@ export function ProjectDetailPage() {
   });
 
 
+
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  const deleteMutation = useMutation({
+    mutationFn: () => deleteProject(projectId!),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['projects'] });
+      useAppStore.getState().setCurrentProject(null, '');
+      navigate('/');
+    },
+  });
+
+  const handleDelete = () => {
+    if (window.confirm('Are you absolutely sure you want to delete this project? This action cannot be undone.')) {
+      deleteMutation.mutate();
+    }
+  };
 
   if (!projectId) {
     return (
@@ -109,6 +126,15 @@ export function ProjectDetailPage() {
             <span className="text-sm text-[var(--text-muted)]">
               {project.primary_output_type || 'No output type'}
             </span>
+            <div className="flex-1" />
+            <Button 
+              variant="secondary" 
+              onClick={handleDelete}
+              loading={deleteMutation.isPending}
+              style={{ color: 'var(--error)', borderColor: 'var(--error-bg)' }}
+            >
+              Delete Project
+            </Button>
           </div>
         </div>
 
@@ -155,7 +181,6 @@ export function ProjectDetailPage() {
               icon: '⚙️',
               to: `/projects/${projectId}/workflows`,
             },
-            { label: 'Outputs', count: 0, icon: '🎥', to: `/projects/${projectId}/outputs` },
           ].map(item => (
             <Link
               key={item.label}

@@ -198,7 +198,8 @@ The JSON MUST conform to the following schema. It MUST contain a "scenes" array,
           "framing": "Wide",
           "angle": "Eye Level",
           "motion": "Static",
-          "narration": "Voiceover script if applicable",
+          "narration": "Voiceover script (can be paraphrased) if applicable",
+          "narration_text": "Story-faithful narration chunk (leave blank unless provided by narration node)",
           "characters": ["Name of character(s) present, must match character_table names"],
           "environment": "Setting details specific to this shot",
           "props": ["Key items present"],
@@ -224,10 +225,10 @@ ALLOWED VALUES:
     title: 'Generate Image',
     description: 'Creates still imagery or storyboard frames from planning outputs.',
     defaultLabel: 'Generate Image',
-    inputSummary: 'prompt_text or shot_plan',
+    inputSummary: 'prompt_text, scene, or shot_plan',
     outputSummary: 'image_asset',
     defaultParams: {
-      prompt: `Generate a cinematic storyboard frame for the selected shot. Output ONLY valid JSON (no markdown, no explanation, no text before or after). The JSON should conform to the following schema:
+      prompt: `Generate a cinematic storyboard frame for the selected scene or shot. Output ONLY valid JSON (no markdown, no explanation, no text before or after). The JSON should conform to the following schema:
 {
   "image_description": "A detailed description of the image to be generated, including style, subject, and composition."
 }`,
@@ -267,7 +268,6 @@ ALLOWED VALUES:
 {
   "narration": "The generated narration text."
 }`,
-      template: 'alloy',
       speed: 1,
       volume: 1,
     },
@@ -411,6 +411,7 @@ export const workflowTemplateCatalog: WorkflowTemplateDefinition[] = [
     nodes: [
       { id: 'story-input', nodeKey: 'story_input' },
       { id: 'generate-scenes', nodeKey: 'generate_scenes' },
+      { id: 'generate-shot-plan', nodeKey: 'generate_shot_plan' },
       { id: 'generate-image', nodeKey: 'generate_image' },
       {
         id: 'generate-narration',
@@ -420,7 +421,6 @@ export const workflowTemplateCatalog: WorkflowTemplateDefinition[] = [
 {
   "narration": "The generated narration text."
 }`,
-          template: 'alloy',
           speed: 1,
           volume: 1,
         },
@@ -430,11 +430,12 @@ export const workflowTemplateCatalog: WorkflowTemplateDefinition[] = [
     ],
     edges: [
       { id: 'edge-1', source: 'story-input', target: 'generate-scenes' },
-      { id: 'edge-2', source: 'generate-scenes', target: 'generate-image' },
-      { id: 'edge-3', source: 'generate-scenes', target: 'generate-narration' },
-      { id: 'edge-4', source: 'generate-image', target: 'assemble-timeline' },
-      { id: 'edge-5', source: 'generate-narration', target: 'assemble-timeline' },
-      { id: 'edge-6', source: 'assemble-timeline', target: 'render-preview' },
+      { id: 'edge-2', source: 'generate-scenes', target: 'generate-shot-plan' },
+      { id: 'edge-3', source: 'generate-shot-plan', target: 'generate-image' },
+      { id: 'edge-4', source: 'generate-shot-plan', target: 'generate-narration' },
+      { id: 'edge-5', source: 'generate-image', target: 'assemble-timeline' },
+      { id: 'edge-6', source: 'generate-narration', target: 'assemble-timeline' },
+      { id: 'edge-7', source: 'assemble-timeline', target: 'render-preview' },
     ],
   },
 ];

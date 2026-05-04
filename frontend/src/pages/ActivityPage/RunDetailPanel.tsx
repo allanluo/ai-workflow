@@ -91,9 +91,6 @@ export function RunDetailPanel({ run, nodeRuns }: RunDetailPanelProps) {
           <button className="px-3 py-1.5 text-sm bg-slate-100 text-slate-700 rounded-lg hover:bg-slate-200">
             View Inputs
           </button>
-          <button className="px-3 py-1.5 text-sm bg-slate-100 text-slate-700 rounded-lg hover:bg-slate-200">
-            View Outputs
-          </button>
         </div>
       </div>
     </div>

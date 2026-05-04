@@ -25,7 +25,9 @@ export const config = {
 
   defaults: {
     llm_model: process.env.DEFAULT_LLM_MODEL ?? 'qwen3:8b',
+    tts_provider: (process.env.DEFAULT_TTS_PROVIDER ?? 'piper') as 'piper' | 'cosyvoice',
     tts_voice: process.env.DEFAULT_TTS_VOICE ?? 'zero_shot_prompt.wav',
+    piper_tts_voice: process.env.DEFAULT_PIPER_TTS_VOICE ?? 'en_US-hfc_female-medium',
   },
 
   execution: {

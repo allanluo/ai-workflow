@@ -1,10 +1,38 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { fetchProjectAssets, createAsset, type Asset } from '../lib/api';
-import { Button, Badge } from '../components/common';
+import { API_BASE_URL, fetchProjectAssets, createAsset, type Asset } from '../lib/api';
+import { Button, Badge, AudioSegmentsPlayer } from '../components/common';
 
 interface ReviewTabProps {
   projectId: string;
+}
+
+function resolveMaybeRelativeUrl(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const url = value.trim();
+  if (!url) return null;
+  if (url.startsWith('http://') || url.startsWith('https://')) return url;
+  if (url.startsWith('/')) {
+    try {
+      return new URL(url, API_BASE_URL).toString();
+    } catch {
+      return url;
+    }
+  }
+  return url;
+}
+
+function getAudioUrlFromAsset(asset: Asset): string | null {
+  const content = asset.current_version?.content as Record<string, unknown> | null;
+  if (!content) return null;
+  return (
+    resolveMaybeRelativeUrl((content as any).audio_url) ??
+    resolveMaybeRelativeUrl((content as any).audioUrl) ??
+    resolveMaybeRelativeUrl((content as any).url) ??
+    resolveMaybeRelativeUrl((content as any).audio_path) ??
+    resolveMaybeRelativeUrl((content as any).audioPath) ??
+    null
+  );
 }
 
 export function ReviewTab({ projectId }: ReviewTabProps) {
@@ -19,7 +47,7 @@ export function ReviewTab({ projectId }: ReviewTabProps) {
 
   const pendingReview =
     assetsQuery.data?.filter(
-      a => a.approval_state === 'unapproved' && a.current_version?.status === 'ready'
+      a => a.approval_state !== 'approved' && a.current_version?.status === 'ready'
     ) || [];
 
   const approved = assetsQuery.data?.filter(a => a.approval_state === 'approved') || [];
@@ -134,6 +162,14 @@ interface AssetDetailPanelProps {
 function AssetDetailPanel({ asset, onClose, projectId }: AssetDetailPanelProps) {
   const queryClient = useQueryClient();
   const [comment, setComment] = useState('');
+  const audioUrl = getAudioUrlFromAsset(asset);
+  const content = asset.current_version?.content as Record<string, unknown> | null;
+  const audioSegments = Array.isArray((content as any)?.audio_segments)
+    ? ((content as any).audio_segments as unknown[])
+    : null;
+  const voiceoverSegments = Array.isArray((content as any)?.voiceover_segments)
+    ? ((content as any).voiceover_segments as Array<Record<string, unknown>>)
+    : null;
 
   const approveMutation = useMutation({
     mutationFn: async () => {
@@ -208,7 +244,82 @@ function AssetDetailPanel({ asset, onClose, projectId }: AssetDetailPanelProps) 
 
             {asset.current_version?.content && (
               <div className="p-4 bg-[var(--bg-hover)] rounded-lg border border-[var(--border-light)]">
-                <h4 className="font-medium text-[var(--text-primary)] mb-2">Content Preview</h4>
+                <h4 className="font-medium text-[var(--text-primary)] mb-2">Preview</h4>
+                {audioSegments?.length || audioUrl ? (
+                  <div className="mb-3">
+                    <div className="text-xs text-[var(--text-muted)] mb-2">Audio</div>
+                    {audioSegments?.length ? (
+                      <AudioSegmentsPlayer segments={audioSegments} fallbackUrl={audioUrl} />
+                    ) : (
+                      <>
+                        <audio controls className="w-full">
+                          <source src={audioUrl!} />
+                        </audio>
+                        <div className="mt-2 text-[11px] text-[var(--text-muted)] break-all">
+                          {audioUrl}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                ) : null}
+
+                {voiceoverSegments?.length ? (
+                  <div className="mb-3">
+                    <div className="text-xs text-[var(--text-muted)] mb-2">Voice-over (Per Shot)</div>
+                    <div className="space-y-3">
+                      {voiceoverSegments.map((segment, idx) => {
+                        const segAudioUrl =
+                          resolveMaybeRelativeUrl((segment as any).audio_url) ??
+                          resolveMaybeRelativeUrl((segment as any).audioUrl) ??
+                          resolveMaybeRelativeUrl((segment as any).audio_path) ??
+                          resolveMaybeRelativeUrl((segment as any).audioPath);
+                        const segAudioSegments = Array.isArray((segment as any).audio_segments)
+                          ? ((segment as any).audio_segments as unknown[])
+                          : null;
+                        const text =
+                          typeof (segment as any).text === 'string'
+                            ? String((segment as any).text)
+                            : typeof (segment as any).text_used === 'string'
+                              ? String((segment as any).text_used)
+                              : null;
+                        const sceneIndex = (segment as any).scene_index;
+                        const shotNumber = (segment as any).shot_number;
+                        const label = [
+                          typeof sceneIndex === 'number' || typeof sceneIndex === 'string' ? `Scene ${sceneIndex}` : null,
+                          typeof shotNumber === 'number' || typeof shotNumber === 'string' ? `Shot ${shotNumber}` : null,
+                        ]
+                          .filter(Boolean)
+                          .join(' • ');
+
+                        return (
+                          <div key={`${idx}`} className="rounded-lg border border-[var(--border-light)] bg-[var(--bg)] p-3">
+                            <div className="mb-2 flex items-center justify-between gap-2">
+                              <div className="text-xs font-medium text-[var(--text-primary)]">
+                                {label || `Shot ${idx + 1}`}
+                              </div>
+                              <div className="text-[11px] text-[var(--text-muted)]">
+                                {(segment as any).status ? String((segment as any).status) : ''}
+                              </div>
+                            </div>
+                            {text ? (
+                              <pre className="mb-3 whitespace-pre-wrap text-xs text-[var(--text-secondary)]">
+                                {text}
+                              </pre>
+                            ) : null}
+                            {segAudioSegments?.length ? (
+                              <AudioSegmentsPlayer segments={segAudioSegments} fallbackUrl={segAudioUrl} />
+                            ) : segAudioUrl ? (
+                              <audio controls className="w-full">
+                                <source src={segAudioUrl} />
+                              </audio>
+                            ) : null}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : null}
+                <div className="text-xs text-[var(--text-muted)] mb-2">Content</div>
                 <pre className="whitespace-pre-wrap text-sm text-[var(--text-secondary)]">
                   {JSON.stringify(asset.current_version.content, null, 2)}
                 </pre>

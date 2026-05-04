@@ -24,10 +24,6 @@ const pageActions: Record<string, { primary: string[]; secondary: string[] }> = 
     primary: ['Validate', 'Run'],
     secondary: ['Freeze', 'Approve', 'Duplicate'],
   },
-  outputs: {
-    primary: ['Create Version', 'Export'],
-    secondary: ['Approve', 'Settings'],
-  },
   timeline: {
     primary: ['Export Preview', 'Export'],
     secondary: ['Preview', 'Replace'],
@@ -49,7 +45,6 @@ const pageTitles: Record<string, string> = {
   scenes: 'Scenes',
   shots: 'Shots',
   workflows: 'Workflows',
-  outputs: 'Outputs',
   timeline: 'Timeline',
   review: 'Review',
   activity: 'Activity',
@@ -199,8 +194,8 @@ export function TopToolbar() {
           </>
         )}
 
-        {/* Export button for outputs/timeline */}
-        {projectId && ['outputs', 'timeline'].includes(currentPage) && (
+        {/* Export button for timeline */}
+        {projectId && currentPage === 'timeline' && (
           <Button variant="primary" size="sm">
             <svg
               width="14"

@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState, type DragEvent, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
+  API_BASE_URL,
   createWorkflow,
   createWorkflowRunDirect,
   createWorkflowVersion,
@@ -29,6 +30,7 @@ import {
 import { useProjectEvents, useWorkflowProgress } from '../lib/useProjectEvents';
 import { showToast, useSelectionStore, usePanelStore } from '../stores';
 import { WorkflowVersionsPanel } from './WorkflowsPage/WorkflowVersionsPanel';
+import { AudioSegmentsPlayer } from '../components/common';
 
 interface WorkflowsTabProps {
   projectId: string;
@@ -73,6 +75,45 @@ function workflowDocumentSelectLabel(wf: WorkflowDefinition) {
   return `${wf.title} · ${nodeCount} nodes · ${wf.mode} · ${dateStr}`;
 }
 
+function getWorkflowTemplateKey(wf: WorkflowDefinition): string | null {
+  const meta = (wf.metadata ?? {}) as Record<string, unknown>;
+  const editorTemplate = typeof meta.editor_template === 'string' ? meta.editor_template : null;
+  return editorTemplate;
+}
+
+function dedupeWorkflowsForPicker(list: WorkflowDefinition[]) {
+  // Collapse accidental duplicates from repeatedly clicking a template:
+  // keep the newest workflow per (title + editor_template) pair.
+  const byKey = new Map<string, WorkflowDefinition>();
+  const passthrough: WorkflowDefinition[] = [];
+
+  for (const wf of list) {
+    const tpl = getWorkflowTemplateKey(wf);
+    if (!tpl) {
+      passthrough.push(wf);
+      continue;
+    }
+
+    const key = `${tpl}::${wf.title ?? ''}`;
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, wf);
+      continue;
+    }
+
+    const existingTime = new Date(existing.updated_at).getTime();
+    const nextTime = new Date(wf.updated_at).getTime();
+    if (Number.isFinite(nextTime) && (nextTime > existingTime || !Number.isFinite(existingTime))) {
+      byKey.set(key, wf);
+    }
+  }
+
+  const collapsed = Array.from(byKey.values());
+  const combined = [...passthrough, ...collapsed];
+  combined.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+  return combined;
+}
+
 function WorkflowDocumentPicker({
   workflows,
   isLoading,
@@ -100,7 +141,7 @@ function WorkflowDocumentPicker({
   className?: string;
   showDelete?: boolean;
 }) {
-  const list = workflows ?? [];
+  const list = dedupeWorkflowsForPicker(workflows ?? []);
   const hasRows = list.length > 0;
   const selectDisabled = isLoading || isError || !hasRows;
   const selectValue =
@@ -204,6 +245,48 @@ export function WorkflowsTab({ projectId }: WorkflowsTabProps) {
     queryFn: () => fetchWorkflowVersions(selectedWorkflowId!),
     enabled: Boolean(selectedWorkflowId),
   });
+
+  // Prevent leaking workflow selection across projects:
+  // if the selected workflow isn't part of this project's list (or the project has none),
+  // clear selection and show an empty canvas until one is created.
+  useEffect(() => {
+    if (!workflowsQuery.data) {
+      return;
+    }
+
+    if (!selectedWorkflowId) {
+      return;
+    }
+
+    const existsInProject = workflowsQuery.data.some(w => w.id === selectedWorkflowId);
+    // Don't clear while the project workflows list is being refreshed (e.g. right after creating a workflow).
+    if (!existsInProject && !workflowsQuery.isFetching) {
+      clearWorkflowSelection();
+      selectWorkflowNode(null);
+      setDraft(null);
+      setDraftError(null);
+      setLastValidation(null);
+      setPendingConnectionSource(null);
+      setIsNodeLibraryOpen(false);
+      setActiveLibraryCategory('input');
+      setViewingVersionId(null);
+      setSelectedRun(null);
+    }
+  }, [
+    workflowsQuery.data,
+    workflowsQuery.isFetching,
+    selectedWorkflowId,
+    clearWorkflowSelection,
+    selectWorkflowNode,
+    setDraft,
+    setDraftError,
+    setLastValidation,
+    setPendingConnectionSource,
+    setIsNodeLibraryOpen,
+    setActiveLibraryCategory,
+    setViewingVersionId,
+    setSelectedRun,
+  ]);
 
   // Auto-select workflow from sessionStorage when navigating from modal
   useEffect(() => {
@@ -339,6 +422,40 @@ export function WorkflowsTab({ projectId }: WorkflowsTabProps) {
   const versionIds = versionsQuery.data?.map(version => version.id) ?? [];
   const workflowRuns =
     runsQuery.data?.filter(run => versionIds.includes(run.workflow_version_id)) ?? [];
+  const sortedWorkflowRuns = useMemo(() => {
+    const copy = [...workflowRuns];
+    copy.sort((a, b) => {
+      const aTime = new Date(a.started_at || a.created_at).getTime();
+      const bTime = new Date(b.started_at || b.created_at).getTime();
+      return bTime - aTime;
+    });
+    return copy;
+  }, [workflowRuns]);
+
+  const latestRunId = sortedWorkflowRuns[0]?.id ?? null;
+  const latestNodeRunsQuery = useQuery({
+    queryKey: ['node-runs', latestRunId],
+    queryFn: () => (latestRunId ? fetchNodeRuns(latestRunId) : Promise.resolve([])),
+    enabled: Boolean(latestRunId),
+  });
+
+  const latestNodeRunByNodeId = useMemo(() => {
+    const map = new Map<string, NodeRun>();
+    for (const nodeRun of latestNodeRunsQuery.data ?? []) {
+      const existing = map.get(nodeRun.node_id);
+      if (!existing) {
+        map.set(nodeRun.node_id, nodeRun);
+        continue;
+      }
+
+      const existingTime = new Date(existing.started_at || existing.created_at).getTime();
+      const nextTime = new Date(nodeRun.started_at || nodeRun.created_at).getTime();
+      if (nextTime > existingTime) {
+        map.set(nodeRun.node_id, nodeRun);
+      }
+    }
+    return map;
+  }, [latestNodeRunsQuery.data]);
   const activeRun = workflowRuns.find(run => run.status === 'running' || run.status === 'queued');
 
   const hasDraft =
@@ -545,6 +662,7 @@ export function WorkflowsTab({ projectId }: WorkflowsTabProps) {
                   {workflowTemplateCatalog.map(template => (
                     <button
                       key={template.id}
+                      type="button"
                       onClick={() => handleCreateWorkflowFromTemplate(template.id)}
                       className="rounded-lg border border-[var(--border)] p-4 text-left transition-colors hover:border-[var(--accent)] hover:bg-[var(--accent)]/5"
                     >
@@ -732,6 +850,10 @@ export function WorkflowsTab({ projectId }: WorkflowsTabProps) {
                     <AdvancedGraphCanvas
                       nodes={draft.nodes}
                       edges={draft.edges}
+                      latestRunId={latestRunId}
+                      latestNodeRunByNodeId={latestNodeRunByNodeId}
+                      isLoadingLatestNodeRuns={latestNodeRunsQuery.isLoading}
+                      onOpenRunDetails={runId => setSelectedRun(runId)}
                       pendingConnectionSource={pendingConnectionSource}
                       onStartConnection={nodeId => setPendingConnectionSource(nodeId)}
                       onCompleteConnection={handleGraphConnection}
@@ -962,6 +1084,10 @@ const categoryStyle: Record<WorkflowNodeCategory, { header: string; dot: string 
 function AdvancedGraphCanvas({
   nodes,
   edges,
+  latestRunId,
+  latestNodeRunByNodeId,
+  isLoadingLatestNodeRuns,
+  onOpenRunDetails,
   pendingConnectionSource,
   onStartConnection,
   onCompleteConnection,
@@ -975,6 +1101,10 @@ function AdvancedGraphCanvas({
 }: {
   nodes: EditableNode[];
   edges: EditableEdge[];
+  latestRunId: string | null;
+  latestNodeRunByNodeId: Map<string, NodeRun>;
+  isLoadingLatestNodeRuns: boolean;
+  onOpenRunDetails: (runId: string) => void;
   pendingConnectionSource: string | null;
   onStartConnection: (nodeId: string) => void;
   onCompleteConnection: (sourceId: string, targetId: string) => void;
@@ -988,6 +1118,7 @@ function AdvancedGraphCanvas({
 }) {
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const [zoom, setZoom] = useState(1);
+  const [inspectedNodeId, setInspectedNodeId] = useState<string | null>(null);
   const [dragState, setDragState] = useState<{
     nodeId: string;
     offsetX: number;
@@ -1063,6 +1194,47 @@ function AdvancedGraphCanvas({
       window.removeEventListener('pointerup', handlePointerUp);
     };
   }, [dragConnection, onCancelConnection, zoom]);
+
+  const resolveApiRelativeUrl = (value: unknown): string | null => {
+    if (typeof value !== 'string') return null;
+    const url = value.trim();
+    if (!url) return null;
+    if (url.startsWith('http://') || url.startsWith('https://')) return url;
+    if (url.startsWith('/')) {
+      try {
+        return new URL(url, API_BASE_URL).toString();
+      } catch {
+        return url;
+      }
+    }
+    return url;
+  };
+
+  const inspectedNode = inspectedNodeId ? nodes.find(n => n.id === inspectedNodeId) ?? null : null;
+  const inspectedNodeRun = inspectedNodeId
+    ? latestNodeRunByNodeId.get(inspectedNodeId) ?? null
+    : null;
+  const inspectedOutput = (inspectedNodeRun?.output_snapshot ?? {}) as Record<string, unknown>;
+  const inspectedInput = (inspectedNodeRun?.input_snapshot ?? {}) as Record<string, unknown>;
+  const inspectedImageUrl = resolveApiRelativeUrl(
+    (inspectedOutput as any).image_url ?? (inspectedOutput as any).imageUrl
+  );
+  const inspectedVideoUrl = resolveApiRelativeUrl(
+    (inspectedOutput as any).video_url ?? (inspectedOutput as any).videoUrl
+  );
+  const inspectedAudioUrl = resolveApiRelativeUrl(
+    (inspectedOutput as any).audio_url ?? (inspectedOutput as any).audioUrl
+  );
+  const inspectedText =
+    typeof (inspectedOutput as any).text_used === 'string'
+      ? String((inspectedOutput as any).text_used)
+      : typeof (inspectedOutput as any).prompt_used === 'string'
+        ? String((inspectedOutput as any).prompt_used)
+        : typeof (inspectedOutput as any).narration === 'string'
+          ? String((inspectedOutput as any).narration)
+          : typeof (inspectedOutput as any)?._debug?.final_prompt === 'string'
+            ? String((inspectedOutput as any)._debug.final_prompt)
+            : null;
 
   return (
     <div
@@ -1351,6 +1523,21 @@ function AdvancedGraphCanvas({
                       }}
                       onClick={e => {
                         e.stopPropagation();
+                        setInspectedNodeId(current => (current === node.id ? null : node.id));
+                      }}
+                      className="rounded-lg bg-white/10 px-2 py-1 text-xs font-bold text-sky-200 transition hover:bg-sky-500/30 cursor-pointer"
+                      title="Show node input/output"
+                    >
+                      I/O
+                    </button>
+                    <button
+                      type="button"
+                      onPointerDown={e => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                      }}
+                      onClick={e => {
+                        e.stopPropagation();
                         console.log('EDIT button clicked for node:', node.id);
                         onEditNode(node.id);
                       }}
@@ -1378,7 +1565,12 @@ function AdvancedGraphCanvas({
                 </div>
 
                 {/* Body */}
-                <div className="px-3 py-2.5">
+                <button
+                  type="button"
+                  onClick={() => onSelectNode(node.id)}
+                  className="block w-full px-3 py-2.5 text-left"
+                  title="Select node"
+                >
                   <p className="line-clamp-2 text-[11px] leading-relaxed text-slate-400">
                     {definition?.description ?? 'Custom workflow node'}
                   </p>
@@ -1409,12 +1601,154 @@ function AdvancedGraphCanvas({
                   <div className="mt-2 text-[9px] text-slate-600 font-medium">
                     Stage {columnIndex + 1} · {node.id.slice(0, 8)}
                   </div>
-                </div>
+                </button>
               </div>
             </div>
           );
         })}
       </div>
+
+      {/* Node I/O panel (bottom right) */}
+      {inspectedNodeId ? (
+        <div className="absolute bottom-4 right-4 z-40 w-[28rem] max-w-[calc(100%-2rem)] rounded-2xl border border-[#2d2d3a] bg-[#0f0f16]/95 shadow-2xl backdrop-blur">
+          <div className="flex items-center justify-between gap-3 border-b border-[#2d2d3a] px-4 py-3">
+            <div className="min-w-0">
+              <div className="truncate text-sm font-semibold text-white">
+                {inspectedNode?.label ?? inspectedNodeId}
+              </div>
+              <div className="text-[11px] text-slate-400">
+                {isLoadingLatestNodeRuns
+                  ? 'Loading latest run…'
+                  : latestRunId
+                    ? `Latest run: ${latestRunId.slice(0, 8)}`
+                    : 'No runs yet'}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              {latestRunId ? (
+                <button
+                  type="button"
+                  onClick={() => onOpenRunDetails(latestRunId)}
+                  className="rounded-lg bg-white/10 px-2 py-1 text-xs font-semibold text-white/80 hover:bg-white/15"
+                >
+                  Open run
+                </button>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => setInspectedNodeId(null)}
+                className="rounded-lg bg-white/10 px-2 py-1 text-xs font-semibold text-white/80 hover:bg-white/15"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+
+          <div className="max-h-[60vh] overflow-auto px-4 py-3 space-y-4">
+            {inspectedNodeRun ? (
+              <div className="text-[11px] text-slate-400">
+                Status: <span className="text-white/90">{inspectedNodeRun.status}</span> ·{' '}
+                {inspectedNodeRun.started_at
+                  ? new Date(inspectedNodeRun.started_at).toLocaleString()
+                  : '-'}
+              </div>
+            ) : (
+              <div className="rounded-xl border border-dashed border-[#2d2d3a] p-4 text-sm text-slate-400">
+                {latestRunId
+                  ? 'No output found for this node in the latest run.'
+                  : 'Run the workflow to see node output here.'}
+              </div>
+            )}
+
+            {inspectedText ? (
+              <div>
+                <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                  Input / Prompt
+                </div>
+                <pre className="max-h-56 overflow-auto rounded-xl bg-black/40 p-3 font-mono text-xs text-slate-100 whitespace-pre-wrap">
+                  {inspectedText}
+                </pre>
+              </div>
+            ) : null}
+
+            {inspectedImageUrl ? (
+              <div>
+                <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                  Image Output
+                </div>
+                <div className="rounded-xl border border-[#2d2d3a] bg-black/30 p-2">
+                  <img
+                    src={inspectedImageUrl}
+                    alt="Node output"
+                    className="w-full max-h-[320px] object-contain rounded"
+                  />
+                  <div className="mt-2 text-[11px] text-slate-400 break-all">
+                    {inspectedImageUrl}
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            {inspectedVideoUrl ? (
+              <div>
+                <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                  Video Output
+                </div>
+                <div className="rounded-xl border border-[#2d2d3a] bg-black/30 p-2">
+                  <video
+                    src={inspectedVideoUrl}
+                    controls
+                    className="w-full max-h-[320px] rounded"
+                  />
+                  <div className="mt-2 text-[11px] text-slate-400 break-all">
+                    {inspectedVideoUrl}
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            {inspectedAudioUrl ? (
+              <div>
+                <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                  Audio Output
+                </div>
+                <div className="rounded-xl border border-[#2d2d3a] bg-black/30 p-3">
+                  <audio src={inspectedAudioUrl} controls className="w-full" />
+                  <div className="mt-2 text-[11px] text-slate-400 break-all">
+                    {inspectedAudioUrl}
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            {inspectedNodeRun ? (
+              <details className="rounded-xl border border-[#2d2d3a] bg-black/30 p-3">
+                <summary className="cursor-pointer text-sm font-medium text-white/80">
+                  Raw snapshots
+                </summary>
+                <div className="mt-3 space-y-3">
+                  <div>
+                    <div className="mb-2 text-xs font-semibold text-slate-300">
+                      input_snapshot
+                    </div>
+                    <pre className="max-h-56 overflow-auto rounded-lg bg-black/40 p-3 font-mono text-xs text-slate-100 whitespace-pre-wrap">
+                      {JSON.stringify(inspectedInput, null, 2)}
+                    </pre>
+                  </div>
+                  <div>
+                    <div className="mb-2 text-xs font-semibold text-slate-300">
+                      output_snapshot
+                    </div>
+                    <pre className="max-h-56 overflow-auto rounded-lg bg-black/40 p-3 font-mono text-xs text-slate-100 whitespace-pre-wrap">
+                      {JSON.stringify(inspectedOutput, null, 2)}
+                    </pre>
+                  </div>
+                </div>
+              </details>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1680,6 +2014,7 @@ function RunDetailPanel({ projectId, runId, onClose }: RunDetailPanelProps) {
   });
 
   const { progress, currentNode } = useWorkflowProgress(projectId, runId);
+  const [expandedNodeRunId, setExpandedNodeRunId] = useState<string | null>(null);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
@@ -1729,7 +2064,14 @@ function RunDetailPanel({ projectId, runId, onClose }: RunDetailPanelProps) {
                 ) : nodeRunsQuery.data && nodeRunsQuery.data.length > 0 ? (
                   <div className="space-y-3">
                     {nodeRunsQuery.data.map(nodeRun => (
-                      <NodeRunRow key={nodeRun.id} nodeRun={nodeRun} />
+                      <NodeRunRow
+                        key={nodeRun.id}
+                        nodeRun={nodeRun}
+                        expanded={expandedNodeRunId === nodeRun.id}
+                        onToggle={() =>
+                          setExpandedNodeRunId(current => (current === nodeRun.id ? null : nodeRun.id))
+                        }
+                      />
                     ))}
                   </div>
                 ) : (
@@ -1759,10 +2101,65 @@ function RunDetailPanel({ projectId, runId, onClose }: RunDetailPanelProps) {
   );
 }
 
-function NodeRunRow({ nodeRun }: { nodeRun: NodeRun }) {
+function resolveApiRelativeUrl(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const url = value.trim();
+  if (!url) return null;
+  if (url.startsWith('http://') || url.startsWith('https://')) return url;
+  if (url.startsWith('/')) {
+    try {
+      return new URL(url, API_BASE_URL).toString();
+    } catch {
+      return url;
+    }
+  }
+  return url;
+}
+
+function NodeRunRow({
+  nodeRun,
+  expanded,
+  onToggle,
+}: {
+  nodeRun: NodeRun;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const params = (nodeRun.input_snapshot?.params ?? {}) as Record<string, unknown>;
+  const out = (nodeRun.output_snapshot ?? {}) as Record<string, unknown>;
+
+  const imageUrl = resolveApiRelativeUrl((out as any).image_url ?? (out as any).imageUrl);
+  const videoUrl = resolveApiRelativeUrl((out as any).video_url ?? (out as any).videoUrl);
+  const audioUrl = resolveApiRelativeUrl((out as any).audio_url ?? (out as any).audioUrl);
+  const audioSegments = Array.isArray((out as any).audio_segments) ? ((out as any).audio_segments as unknown[]) : null;
+  const voiceoverSegments = Array.isArray((out as any).voiceover_segments)
+    ? ((out as any).voiceover_segments as Array<Record<string, unknown>>)
+    : null;
+
+  const promptUsed =
+    typeof (out as any)?.text_used === 'string'
+      ? String((out as any).text_used)
+      : typeof (out as any)?.narration === 'string'
+        ? String((out as any).narration)
+        : typeof (out as any)?.prompt_used === 'string'
+          ? String((out as any).prompt_used)
+      : typeof (out as any)?._debug?.final_prompt === 'string'
+        ? String((out as any)._debug.final_prompt)
+        : typeof (params as any)?.prompt === 'string'
+          ? String((params as any).prompt)
+          : typeof (params as any)?.text === 'string'
+            ? String((params as any).text)
+            : null;
+
   return (
     <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-      <div className="flex items-center gap-3">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="w-full text-left"
+        aria-expanded={expanded}
+      >
+        <div className="flex items-center gap-3">
         <NodeStatusBadge status={nodeRun.status} />
         <div className="flex-1">
           <div className="text-sm font-medium text-slate-800">{nodeRun.node_id}</div>
@@ -1772,6 +2169,145 @@ function NodeRunRow({ nodeRun }: { nodeRun: NodeRun }) {
           {nodeRun.started_at ? new Date(nodeRun.started_at).toLocaleTimeString() : '-'}
         </span>
       </div>
+      </button>
+
+      {expanded ? (
+        <div className="mt-4 space-y-4">
+          {promptUsed ? (
+            <div>
+              <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+                Prompt / Input
+              </div>
+              <pre className="max-h-56 overflow-auto rounded-xl bg-slate-950 p-3 font-mono text-xs text-slate-100 whitespace-pre-wrap">
+                {promptUsed}
+              </pre>
+            </div>
+          ) : null}
+
+          {imageUrl ? (
+            <div>
+              <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+                Image Output
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-white p-2">
+                <img src={imageUrl} alt="Node output" className="w-full max-h-[420px] object-contain rounded" />
+                <div className="mt-2 text-[11px] text-slate-500 break-all">{imageUrl}</div>
+              </div>
+            </div>
+          ) : null}
+
+          {videoUrl ? (
+            <div>
+              <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+                Video Output
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-white p-2">
+                <video src={videoUrl} controls className="w-full max-h-[420px] rounded" />
+                <div className="mt-2 text-[11px] text-slate-500 break-all">{videoUrl}</div>
+              </div>
+            </div>
+          ) : null}
+
+          {audioSegments?.length || audioUrl ? (
+            <div>
+              <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+                Audio Output
+              </div>
+              {audioSegments?.length ? (
+                <AudioSegmentsPlayer segments={audioSegments} fallbackUrl={audioUrl} />
+              ) : (
+                <div className="rounded-xl border border-slate-200 bg-white p-3">
+                  <audio src={audioUrl!} controls className="w-full" />
+                  <div className="mt-2 text-[11px] text-slate-500 break-all">{audioUrl}</div>
+                </div>
+              )}
+            </div>
+          ) : null}
+
+          {voiceoverSegments?.length ? (
+            <div>
+              <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+                Voice-over (Per Shot)
+              </div>
+              <div className="space-y-3">
+                {voiceoverSegments.map((segment, idx) => {
+                  const segAudioUrl = resolveApiRelativeUrl((segment as any).audio_url ?? (segment as any).audioUrl);
+                  const segAudioSegments = Array.isArray((segment as any).audio_segments)
+                    ? ((segment as any).audio_segments as unknown[])
+                    : null;
+                  const text =
+                    typeof (segment as any).text === 'string'
+                      ? String((segment as any).text)
+                      : typeof (segment as any).text_used === 'string'
+                        ? String((segment as any).text_used)
+                        : null;
+                  const sceneIndex = (segment as any).scene_index;
+                  const shotNumber = (segment as any).shot_number;
+                  const label = [
+                    typeof sceneIndex === 'number' || typeof sceneIndex === 'string' ? `Scene ${sceneIndex}` : null,
+                    typeof shotNumber === 'number' || typeof shotNumber === 'string' ? `Shot ${shotNumber}` : null,
+                  ]
+                    .filter(Boolean)
+                    .join(' • ');
+
+                  return (
+                    <div key={`${idx}`} className="rounded-xl border border-slate-200 bg-white p-3">
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <div className="text-xs font-medium text-slate-800">
+                          {label || `Shot ${idx + 1}`}
+                        </div>
+                        <div className="text-[11px] text-slate-500">
+                          {(segment as any).status ? String((segment as any).status) : ''}
+                        </div>
+                      </div>
+
+                      {text ? (
+                        <pre className="mb-3 max-h-40 overflow-auto rounded-lg bg-slate-950 p-3 font-mono text-xs text-slate-100 whitespace-pre-wrap">
+                          {text}
+                        </pre>
+                      ) : null}
+
+                      {segAudioSegments?.length ? (
+                        <AudioSegmentsPlayer segments={segAudioSegments} fallbackUrl={segAudioUrl} />
+                      ) : segAudioUrl ? (
+                        <audio src={segAudioUrl} controls className="w-full" />
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
+
+          <details className="rounded-xl border border-slate-200 bg-white p-3">
+            <summary className="cursor-pointer text-sm font-medium text-slate-700">
+              Raw snapshots
+            </summary>
+            <div className="mt-3 space-y-3">
+              <div>
+                <div className="mb-2 text-xs font-semibold text-slate-600">input_snapshot</div>
+                <pre className="max-h-56 overflow-auto rounded-lg bg-slate-950 p-3 font-mono text-xs text-slate-100 whitespace-pre-wrap">
+                  {JSON.stringify(nodeRun.input_snapshot, null, 2)}
+                </pre>
+              </div>
+              <div>
+                <div className="mb-2 text-xs font-semibold text-slate-600">output_snapshot</div>
+                <pre className="max-h-56 overflow-auto rounded-lg bg-slate-950 p-3 font-mono text-xs text-slate-100 whitespace-pre-wrap">
+                  {JSON.stringify(nodeRun.output_snapshot, null, 2)}
+                </pre>
+              </div>
+              {nodeRun.errors?.length ? (
+                <div>
+                  <div className="mb-2 text-xs font-semibold text-rose-700">errors</div>
+                  <pre className="max-h-40 overflow-auto rounded-lg bg-rose-950 p-3 font-mono text-xs text-rose-100 whitespace-pre-wrap">
+                    {nodeRun.errors.join('\n')}
+                  </pre>
+                </div>
+              ) : null}
+            </div>
+          </details>
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -617,6 +617,7 @@ export function createAssetFromNodeOutput(input: CreateAssetFromNodeOutputInput)
     // TTS/Audio nodes
     tts: { type: 'narration_audio', category: 'audio' },
     text_to_speech: { type: 'narration_audio', category: 'audio' },
+    generate_narration: { type: 'narration_audio', category: 'audio' },
     // Image nodes
     image: { type: 'generated_image', category: 'visual' },
     image_generation: { type: 'generated_image', category: 'visual' },

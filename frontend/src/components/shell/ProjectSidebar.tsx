@@ -13,7 +13,6 @@ const navItems: NavItem[] = [
   { id: 'scenes', label: 'Scenes', icon: '🎬' },
   { id: 'shots', label: 'Shots', icon: '📷' },
   { id: 'workflows', label: 'Workflows', icon: '⚙️' },
-  { id: 'outputs', label: 'Outputs', icon: '🎥' },
   { id: 'timeline', label: 'Timeline', icon: '🕐' },
   { id: 'review', label: 'Review', icon: '✅' },
   { id: 'activity', label: 'Activity', icon: '📊' },

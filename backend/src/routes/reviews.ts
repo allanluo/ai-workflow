@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { z } from 'zod';
 import {
   createComment,
@@ -57,6 +58,143 @@ const assetIdParamsSchema = z.object({ assetId: z.string() });
 const outputIdParamsSchema = z.object({ outputId: z.string() });
 const commentIdParamsSchema = z.object({ commentId: z.string() });
 const exportJobIdParamsSchema = z.object({ exportJobId: z.string() });
+const storyboardExportSegmentSchema = z.object({
+  shot_id: z.string().optional(),
+  title: z.string().optional(),
+  image_url: z.string().optional(),
+  video_url: z.string().optional(),
+  audio_url: z.string().optional(),
+  duration_seconds: z.number().positive().optional(),
+});
+const DEFAULT_STILL_DURATION_SECONDS = 3;
+const DOWNLOAD_RETRY_COUNT = 3;
+const DOWNLOAD_TIMEOUT_MS = 30000;
+
+function sleep(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function getUrlExtension(url: string, fallback: string) {
+  try {
+    const pathname = new URL(url).pathname;
+    return path.extname(pathname) || fallback;
+  } catch {
+    return path.extname(url.split('?')[0] || '') || fallback;
+  }
+}
+
+async function downloadRemoteFile(url: string, filePath: string) {
+  let lastError: unknown = null;
+
+  for (let attempt = 1; attempt <= DOWNLOAD_RETRY_COUNT; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(url, { signal: controller.signal });
+      if (!response.ok) {
+        throw new Error(`Failed to fetch media ${url}: ${response.status} ${response.statusText}`);
+      }
+      const buffer = Buffer.from(await response.arrayBuffer());
+      fs.writeFileSync(filePath, buffer);
+      return;
+    } catch (error) {
+      lastError = error;
+      try {
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      } catch {
+        // ignore cleanup failure
+      }
+      if (attempt < DOWNLOAD_RETRY_COUNT) {
+        await sleep(400 * attempt);
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  throw lastError instanceof Error
+    ? new Error(`Failed to download media after ${DOWNLOAD_RETRY_COUNT} attempts: ${lastError.message}`)
+    : new Error(`Failed to download media after ${DOWNLOAD_RETRY_COUNT} attempts`);
+}
+
+function probeMediaDurationSeconds(filePath: string): number | null {
+  try {
+    const output = execFileSync(
+      'ffprobe',
+      [
+        '-v',
+        'error',
+        '-show_entries',
+        'format=duration',
+        '-of',
+        'default=noprint_wrappers=1:nokey=1',
+        filePath,
+      ],
+      { encoding: 'utf8' }
+    ).trim();
+    const duration = Number(output);
+    return Number.isFinite(duration) && duration > 0 ? duration : null;
+  } catch {
+    return null;
+  }
+}
+
+function renderStoryboardSegmentVideo(input: {
+  imagePath?: string;
+  videoPath?: string;
+  audioPath?: string;
+  durationSeconds: number;
+  outputPath: string;
+}) {
+  const args: string[] = ['-y'];
+  if (input.videoPath) {
+    args.push('-stream_loop', '-1', '-i', input.videoPath);
+  } else if (input.imagePath) {
+    args.push('-loop', '1', '-i', input.imagePath);
+  } else {
+    throw new Error('Missing image or video input for export segment');
+  }
+
+  if (input.audioPath) {
+    args.push('-i', input.audioPath);
+  } else {
+    args.push('-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo');
+  }
+
+  args.push(
+    '-t',
+    String(Math.max(input.durationSeconds, 0.5)),
+    '-vf',
+    'scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,fps=30',
+    '-c:v',
+    'libx264',
+    '-preset',
+    'veryfast',
+    '-pix_fmt',
+    'yuv420p',
+    '-c:a',
+    'aac',
+    '-ar',
+    '48000',
+    '-ac',
+    '2',
+    '-shortest',
+    input.outputPath
+  );
+
+  execFileSync('ffmpeg', args, { stdio: 'pipe' });
+}
+
+function concatRenderedSegments(segmentPaths: string[], outputPath: string, inputsFilePath: string) {
+  const inputsContent = segmentPaths.map(filePath => `file '${filePath.replace(/'/g, "'\\''")}'`).join('\n');
+  fs.writeFileSync(inputsFilePath, inputsContent);
+  execFileSync(
+    'ffmpeg',
+    ['-y', '-f', 'concat', '-safe', '0', '-i', inputsFilePath, '-c', 'copy', outputPath],
+    { stdio: 'pipe' }
+  );
+}
 
 export async function registerReviewRoutes(app: FastifyInstance) {
   app.get<{ Params: { projectId: string } }>('/projects/:projectId/comments', async request => {
@@ -329,60 +467,141 @@ export async function registerReviewRoutes(app: FastifyInstance) {
       const metadata = typeof metadataRaw === 'string' ? JSON.parse(metadataRaw) : metadataRaw;
         
       console.log(`[Worker] Job ${job.id} Metadata:`, JSON.stringify(metadata));
+      const parsedSegments = Array.isArray(metadata.segments)
+        ? metadata.segments
+            .flatMap((segment: unknown) => {
+              const result = storyboardExportSegmentSchema.safeParse(segment);
+              return result.success ? [result.data] : [];
+            })
+        : [];
       const videoUrls = metadata.video_urls || [];
-      
-      if (videoUrls.length === 0) {
+
+      if (parsedSegments.length === 0 && videoUrls.length === 0) {
         completeExportJob(job.id, '', false, 'No video segments found for this project. Please generate videos for your shots first.');
         return;
       }
 
-      // 2. Download videos to temp directory
       const exportDir = path.join(process.cwd(), 'storage', 'projects', job.projectId, 'exports');
       if (!fs.existsSync(exportDir)) fs.mkdirSync(exportDir, { recursive: true });
       
       const tempDir = path.join(exportDir, `temp_${job.id}`);
       if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
 
-      const localPaths: string[] = [];
-      for (let i = 0; i < videoUrls.length; i++) {
-        const url = videoUrls[i];
-        const localPath = path.join(tempDir, `shot_${i}.mp4`);
+      const finalExportPath = path.join(exportDir, `${job.id}.mp4`);
+
+      if (parsedSegments.length > 0) {
+        const renderedSegmentPaths: string[] = [];
+
+        for (let i = 0; i < parsedSegments.length; i++) {
+          const segment = parsedSegments[i];
+          const videoUrl = segment.video_url?.trim();
+          const imageUrl = segment.image_url?.trim();
+          const audioUrl = segment.audio_url?.trim();
+
+          if (!videoUrl && !imageUrl) {
+            continue;
+          }
+
+          try {
+            const sourceVideoPath = videoUrl
+              ? path.join(tempDir, `segment_${i}_video${getUrlExtension(videoUrl, '.mp4')}`)
+              : null;
+            const sourceImagePath = !videoUrl && imageUrl
+              ? path.join(tempDir, `segment_${i}_image${getUrlExtension(imageUrl, '.png')}`)
+              : null;
+            let sourceAudioPath = audioUrl
+              ? path.join(tempDir, `segment_${i}_audio${getUrlExtension(audioUrl, '.mp3')}`)
+              : null;
+
+            if (sourceVideoPath && videoUrl) {
+              await downloadRemoteFile(videoUrl, sourceVideoPath);
+            }
+            if (sourceImagePath && imageUrl) {
+              await downloadRemoteFile(imageUrl, sourceImagePath);
+            }
+            if (sourceAudioPath && audioUrl) {
+              try {
+                await downloadRemoteFile(audioUrl, sourceAudioPath);
+              } catch (err) {
+                console.warn(
+                  `[Worker] Segment ${segment.shot_id || i} audio download failed, continuing without audio:`,
+                  err
+                );
+                sourceAudioPath = null;
+              }
+            }
+
+            const durationSeconds =
+              segment.duration_seconds ??
+              probeMediaDurationSeconds(sourceAudioPath || '') ??
+              probeMediaDurationSeconds(sourceVideoPath || '') ??
+              DEFAULT_STILL_DURATION_SECONDS;
+
+            const renderedSegmentPath = path.join(tempDir, `rendered_${i}.mp4`);
+            renderStoryboardSegmentVideo({
+              imagePath: sourceImagePath ?? undefined,
+              videoPath: sourceVideoPath ?? undefined,
+              audioPath: sourceAudioPath ?? undefined,
+              durationSeconds,
+              outputPath: renderedSegmentPath,
+            });
+            renderedSegmentPaths.push(renderedSegmentPath);
+          } catch (err) {
+            console.warn(
+              `[Worker] Segment ${segment.shot_id || i} render skipped due to media download/render failure:`,
+              err
+            );
+            continue;
+          }
+
+          updateExportJobProgress(job.id, 10 + Math.floor(((i + 1) / parsedSegments.length) * 65), 'running');
+        }
+
+        if (renderedSegmentPaths.length === 0) {
+          throw new Error('Failed to render any storyboard segments for export');
+        }
+
+        try {
+          updateExportJobProgress(job.id, 85, 'running');
+          concatRenderedSegments(renderedSegmentPaths, finalExportPath, path.join(tempDir, 'inputs.txt'));
+          updateExportJobProgress(job.id, 100, 'completed');
+          completeExportJob(job.id, finalExportPath, true);
+        } catch (err) {
+          console.error('FFmpeg storyboard concat failed:', err);
+          fs.copyFileSync(renderedSegmentPaths[0], finalExportPath);
+          completeExportJob(job.id, finalExportPath, true);
+        }
+      } else {
+        const localPaths: string[] = [];
+        for (let i = 0; i < videoUrls.length; i++) {
+          const url = videoUrls[i];
+          const localPath = path.join(tempDir, `shot_${i}.mp4`);
+          
+          try {
+            await downloadRemoteFile(url, localPath);
+            localPaths.push(localPath);
+            updateExportJobProgress(job.id, 10 + Math.floor((i / videoUrls.length) * 40), 'running');
+          } catch (err) {
+            console.error(`Failed to download video ${url}:`, err);
+          }
+        }
+
+        if (localPaths.length === 0) {
+          throw new Error('Failed to download any videos for stitching');
+        }
+
+        const inputsFile = path.join(tempDir, 'inputs.txt');
         
         try {
-          const response = await fetch(url);
-          if (!response.ok) throw new Error(`Failed to fetch video: ${response.statusText}`);
-          const buffer = await response.arrayBuffer();
-          fs.writeFileSync(localPath, Buffer.from(buffer));
-          localPaths.push(localPath);
-            updateExportJobProgress(job.id, 10 + Math.floor((i / videoUrls.length) * 40), 'running');
-        } catch (err) {
-          console.error(`Failed to download video ${url}:`, err);
-        }
-      }
-
-      if (localPaths.length === 0) {
-        throw new Error('Failed to download any videos for stitching');
-      }
-
-      // 3. Stitch videos using FFmpeg
-      const inputsFile = path.join(tempDir, 'inputs.txt');
-      const inputsContent = localPaths.map(p => `file '${p}'`).join('\n');
-      fs.writeFileSync(inputsFile, inputsContent);
-
-      const finalExportPath = path.join(exportDir, `${job.id}.mp4`);
-      const { execSync } = await import('node:child_process');
-      
-      try {
-        updateExportJobProgress(job.id, 60, 'running');
-        // Simple concatenation. For more robust results, use filter_complex if codecs differ.
-        execSync(`ffmpeg -f concat -safe 0 -i "${inputsFile}" -c copy "${finalExportPath}" -y`);
-        updateExportJobProgress(job.id, 100, 'completed');
-        completeExportJob(job.id, finalExportPath, true);
-      } catch (err) {
-        console.error('FFmpeg stitching failed:', err);
-        // Fallback to first video if stitching fails
-        fs.copyFileSync(localPaths[0], finalExportPath);
+          updateExportJobProgress(job.id, 60, 'running');
+          concatRenderedSegments(localPaths, finalExportPath, inputsFile);
+          updateExportJobProgress(job.id, 100, 'completed');
           completeExportJob(job.id, finalExportPath, true);
+        } catch (err) {
+          console.error('FFmpeg stitching failed:', err);
+          fs.copyFileSync(localPaths[0], finalExportPath);
+          completeExportJob(job.id, finalExportPath, true);
+        }
       }
 
       // Cleanup

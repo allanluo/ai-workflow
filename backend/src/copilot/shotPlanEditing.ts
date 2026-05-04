@@ -4,6 +4,7 @@ export type ShotPlanItem = {
   shotNumber?: string | number; // Legacy
   action?: string; // New standard
   description?: string; // Legacy
+  narration_text?: string;
   narration?: string;
   internal_monologue?: string;
   dialogue?: string;
@@ -185,4 +186,3 @@ export function updateShotImageOverrideInPlan(
     plan.shots = shots;
   }
 }
-

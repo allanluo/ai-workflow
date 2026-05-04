@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { Routes, Route } from 'react-router-dom';
+import { Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Shell } from './components/layout';
 import { HomePage } from './pages/HomePage';
@@ -9,7 +9,6 @@ import { CanonTab } from './pages/CanonTab';
 import { ScenesTab } from './pages/ScenesTab';
 import { WorkflowsTab } from './pages/WorkflowsTab';
 import { ReviewTab } from './pages/ReviewTab';
-import { OutputsTab } from './pages/OutputsTab';
 import { ShotsPage } from './pages/ShotsPage/ShotsPage';
 import { ActivityPage } from './pages/ActivityPage/ActivityPage';
 import { TimelinePage } from './pages/TimelinePage/TimelinePage';
@@ -17,6 +16,8 @@ import { DiffViewer } from './components/diff/DiffViewer';
 import { useProjectSync } from './hooks/useProjectSync';
 import { useAppStore } from './stores';
 import { fetchHealth } from './lib/api';
+import { CreateProjectModal } from './components/shell/CreateProjectModal';
+import { ProjectPickerModal } from './components/common/ProjectPickerModal';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -57,7 +58,10 @@ export function App() {
             path="/projects/:projectId/workflows"
             element={<TabWrapper Tab={WorkflowsTab} />}
           />
-          <Route path="/projects/:projectId/outputs" element={<TabWrapper Tab={OutputsTab} />} />
+          <Route
+            path="/projects/:projectId/outputs"
+            element={<Navigate to="../timeline" replace />}
+          />
           <Route path="/projects/:projectId/review" element={<TabWrapper Tab={ReviewTab} />} />
           <Route path="/projects/:projectId/shots" element={<ShotsPageWrapper />} />
           <Route path="/projects/:projectId/timeline" element={<TimelinePageWrapper />} />
@@ -65,6 +69,7 @@ export function App() {
           <Route path="/projects/:projectId/compare" element={<CompareWrapper />} />
         </Routes>
       </Shell>
+      <CreateProjectModal />
     </QueryClientProvider>
   );
 }

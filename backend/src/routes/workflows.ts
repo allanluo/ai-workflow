@@ -4,6 +4,7 @@ import {
   createWorkflowVersion,
   createWorkflowRun,
   deleteWorkflowDefinition,
+  getProjectById,
   getNodeRunById,
   getWorkflowDefinitionById,
   getWorkflowRunById,
@@ -62,6 +63,18 @@ const createWorkflowRunSchema = z.object({
 export async function registerWorkflowRoutes(app: FastifyInstance) {
   app.post('/projects/:projectId/workflows', async (request, reply) => {
     const params = z.object({ projectId: z.string() }).parse(request.params);
+    const project = getProjectById(params.projectId);
+    if (!project) {
+      reply.code(404);
+      return {
+        ok: false,
+        data: null,
+        error: {
+          code: 'not_found',
+          message: `Project ${params.projectId} was not found`,
+        },
+      };
+    }
     const body = createWorkflowSchema.parse(request.body);
     const workflow = createWorkflowDefinition(params.projectId, body);
     scheduleIndexWorkflow(workflow.id);
@@ -77,6 +90,17 @@ export async function registerWorkflowRoutes(app: FastifyInstance) {
 
   app.get('/projects/:projectId/workflows', async request => {
     const params = z.object({ projectId: z.string() }).parse(request.params);
+    const project = getProjectById(params.projectId);
+    if (!project) {
+      return {
+        ok: false,
+        data: null,
+        error: {
+          code: 'not_found',
+          message: `Project ${params.projectId} was not found`,
+        },
+      };
+    }
 
     return {
       ok: true,

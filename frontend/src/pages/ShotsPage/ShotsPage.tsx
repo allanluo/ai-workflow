@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { API_BASE_URL, createAssetVersion, fetchProjectAssets, type Asset } from '../../lib/api';
-import { useQuickExport } from '../../lib/api/useQuickExport';
 import { ensureShotIdsInPlan, parseShotPlanForEdit, writeBackShotPlan } from '../../lib/shotPlanEditing';
 import { ShotListPanel } from './ShotListPanel';
 import { ShotEditor } from './ShotEditor';
@@ -11,6 +10,7 @@ import { ShotToolbar } from './ShotToolbar';
 import { StoryboardPreviewModal } from './StoryboardPreviewModal';
 import { showToast } from '../../stores';
 import { useSelectionStore } from '../../stores';
+import { useProjectEvents } from '../../lib/useProjectEvents';
 
 interface ShotsPageProps {
   projectId: string;
@@ -35,6 +35,7 @@ interface Shot {
   generator_prompt_structured?: string;
   // Advanced fields
   action?: string;
+  narration_text?: string;
   narration?: string;
   internal_monologue?: string;
   dialogue?: string;
@@ -52,6 +53,8 @@ type ShotPlanItem = {
   shot_number?: string | number;
   action?: string;
   description?: string;
+  narration_text?: string;
+  narrationText?: string;
   narration?: string;
   internal_monologue?: string;
   internalMonologue?: string;
@@ -296,8 +299,17 @@ export function ShotsPage({ projectId }: ShotsPageProps) {
   const [selectedShotId, setSelectedShotId] = useState<string | null>(null);
   const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null);
   const [showPreview, setShowPreview] = useState(false);
+  const [autoAppliedNarrationKeyByPlanId, setAutoAppliedNarrationKeyByPlanId] = useState<Record<string, string>>({});
 
   const selectedWorkflowId = useSelectionStore(s => s.selectedWorkflowId);
+
+  useProjectEvents({
+    projectId,
+    onEvent: () => {
+      queryClient.invalidateQueries({ queryKey: ['project-shot-plans', projectId] });
+      queryClient.invalidateQueries({ queryKey: ['project-assets', projectId] });
+    },
+  });
 
   const shotsQuery = useQuery({
     // Dedicated query key to avoid cross-tab cache interference with other `project-assets` consumers
@@ -306,7 +318,9 @@ export function ShotsPage({ projectId }: ShotsPageProps) {
     queryFn: () => fetchProjectAssets(projectId),
     enabled: Boolean(projectId),
     select: assets =>
-      assets.filter(a => ['shot_plan', 'storyboard', 'scene_batch', 'generated_text'].includes(a.asset_type)),
+      assets.filter(a =>
+        ['shot_plan', 'storyboard', 'scene_batch', 'generated_text', 'narration_audio'].includes(a.asset_type)
+      ),
   });
 
   const shotPlans = useMemo(() => {
@@ -334,6 +348,27 @@ export function ShotsPage({ projectId }: ShotsPageProps) {
     shotPlans.find(p => p.id === selectedPlanId) ?? (shotPlans.length > 0 ? shotPlans[0] : null);
 
   const planItems = selectedPlan ? extractShotPlanItems(selectedPlan) : [];
+
+  const latestNarrationAsset = useMemo(() => {
+    const allCandidates = (shotsQuery.data ?? [])
+      .filter(a => a.asset_type === 'narration_audio' && a.status !== 'deprecated')
+      .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+
+    const planWorkflowId =
+      selectedPlan && typeof (selectedPlan.metadata as any)?.workflow_id === 'string'
+        ? String((selectedPlan.metadata as any).workflow_id)
+        : null;
+
+    const workflowId = planWorkflowId || selectedWorkflowId || null;
+    if (!workflowId) return allCandidates[0] ?? null;
+
+    const filtered = allCandidates.filter(a => {
+      const meta = a.metadata as Record<string, unknown> | null;
+      return meta?.workflow_id === workflowId;
+    });
+
+    return filtered[0] ?? allCandidates[0] ?? null;
+  }, [shotsQuery.data, selectedWorkflowId, selectedPlan]);
 
   const normalizeCameraSetting = (val: string, type: 'framing' | 'angle' | 'motion'): string => {
     const v = val.trim().toLowerCase();
@@ -457,6 +492,12 @@ export function ShotsPage({ projectId }: ShotsPageProps) {
           generator_prompt_structured: generatorPromptStructured || undefined,
           // Advanced fields
           action: item.action || item.description || '',
+          narration_text:
+            typeof item.narration_text === 'string'
+              ? item.narration_text
+              : typeof item.narrationText === 'string'
+                ? item.narrationText
+                : '',
           narration: item.narration || '',
           internal_monologue:
             typeof item.internal_monologue === 'string'
@@ -578,17 +619,7 @@ export function ShotsPage({ projectId }: ShotsPageProps) {
     },
   });
 
-  const { handleQuickExport, isExporting, activeJob } = useQuickExport(projectId);
-
-  const onExportTrigger = () => handleQuickExport(selectedPlan);
-
-  const triggerExportCount = useSelectionStore(s => s.triggerExportCount);
-
-  useEffect(() => {
-    if (triggerExportCount > 0 && selectedPlan && !isExporting) {
-      onExportTrigger();
-    }
-  }, [triggerExportCount]);
+  // Quick export removed from Shots tab.
 
 
   const handleAddShot = () => {
@@ -740,6 +771,7 @@ export function ShotsPage({ projectId }: ShotsPageProps) {
           motion: updates.motion ?? target.motion,
           // Advanced fields
           action: updates.action ?? target.action,
+          narration_text: updates.narration_text ?? target.narration_text,
           narration: updates.narration ?? target.narration,
           internal_monologue: updates.internal_monologue ?? target.internal_monologue,
           dialogue: updates.dialogue ?? target.dialogue,
@@ -768,6 +800,169 @@ export function ShotsPage({ projectId }: ShotsPageProps) {
     updatePlanMutation.mutate({ planAssetId: selectedPlan.id, content: nextContent });
   };
 
+  const applyNarrationSplitsToPlan = ({
+    plan,
+    segments,
+  }: {
+    plan: Asset;
+    segments: any[];
+  }): { nextContent: Record<string, unknown>; applied: number; changed: number } | null => {
+    const parsed = parseShotPlanForEdit(plan);
+    if (!parsed) return null;
+
+    const nextPlan = JSON.parse(JSON.stringify(parsed.plan ?? {})) as Record<string, unknown>;
+    ensureShotIdsInPlan(nextPlan, plan.id);
+
+    const flattenShots = () => {
+      const out: Array<Record<string, any>> = [];
+      const addShot = (shot: any) => {
+        if (!shot || typeof shot !== 'object') return;
+        out.push(shot as Record<string, any>);
+      };
+
+      if (Array.isArray((nextPlan as any).scenes)) {
+        for (const scene of (nextPlan as any).scenes as any[]) {
+          if (!scene || typeof scene !== 'object' || !Array.isArray(scene.shots)) continue;
+          const sceneShots = (scene.shots as any[]).filter(s => s && typeof s === 'object');
+          sceneShots.sort((a, b) => {
+            const aNum =
+              typeof a.shot_number === 'number'
+                ? a.shot_number
+                : typeof a.shotNumber === 'number'
+                  ? a.shotNumber
+                  : NaN;
+            const bNum =
+              typeof b.shot_number === 'number'
+                ? b.shot_number
+                : typeof b.shotNumber === 'number'
+                  ? b.shotNumber
+                  : NaN;
+            if (Number.isFinite(aNum) && Number.isFinite(bNum)) return aNum - bNum;
+            if (Number.isFinite(aNum)) return -1;
+            if (Number.isFinite(bNum)) return 1;
+            return 0;
+          });
+          for (const shot of sceneShots) addShot(shot);
+        }
+        return out;
+      }
+
+      if (Array.isArray((nextPlan as any).shots)) {
+        const topLevelShots = ((nextPlan as any).shots as any[]).filter(s => s && typeof s === 'object');
+        for (const shot of topLevelShots) addShot(shot);
+      }
+      return out;
+    };
+
+    const shotsFlat = flattenShots();
+    if (shotsFlat.length === 0) return null;
+
+    const byId = new Map<string, Record<string, any>>();
+    for (const shot of shotsFlat) {
+      if (typeof shot.id === 'string' && shot.id.trim()) byId.set(shot.id.trim(), shot);
+    }
+
+    const pendingAssignments: Array<{ shot: Record<string, any>; text: string }> = [];
+    const getSegmentText = (seg: any) => {
+      const text =
+        typeof seg.text === 'string'
+          ? seg.text
+          : typeof seg.text_used === 'string'
+            ? seg.text_used
+            : typeof seg.narration === 'string'
+              ? seg.narration
+              : '';
+      return String(text || '').trim();
+    };
+
+    const remaining: any[] = [];
+    for (const seg of segments) {
+      const text = getSegmentText(seg);
+      if (!text) continue;
+      const shotId = typeof seg.shot_id === 'string' ? seg.shot_id.trim() : '';
+      if (shotId && byId.has(shotId)) pendingAssignments.push({ shot: byId.get(shotId)!, text });
+      else remaining.push(seg);
+    }
+
+    remaining.sort((a, b) => {
+      const aOrder = typeof a.order === 'number' ? a.order : 0;
+      const bOrder = typeof b.order === 'number' ? b.order : 0;
+      return aOrder - bOrder;
+    });
+
+    for (let i = 0; i < remaining.length && i < shotsFlat.length; i += 1) {
+      const seg = remaining[i];
+      const text = getSegmentText(seg);
+      if (!text) continue;
+      if (pendingAssignments.some(a => a.shot === shotsFlat[i])) continue;
+      pendingAssignments.push({ shot: shotsFlat[i]!, text });
+    }
+
+    let applied = 0;
+    let changed = 0;
+    for (const { shot, text } of pendingAssignments) {
+      const current =
+        typeof shot.narration_text === 'string'
+          ? shot.narration_text
+          : typeof shot.narrationText === 'string'
+            ? shot.narrationText
+            : '';
+      if (String(current || '').trim() !== text) changed += 1;
+      shot.narration_text = text;
+      applied += 1;
+    }
+
+    if (applied === 0) return null;
+    return {
+      nextContent: writeBackShotPlan(parsed, nextPlan) as Record<string, unknown>,
+      applied,
+      changed,
+    };
+  };
+
+  useEffect(() => {
+    if (!selectedPlan) return;
+    if (updatePlanMutation.isPending) return;
+    if (!latestNarrationAsset?.current_version?.content) return;
+
+    const content = latestNarrationAsset.current_version.content as any;
+    const segments = Array.isArray(content.voiceover_segments) ? (content.voiceover_segments as any[]) : null;
+    if (!segments || segments.length === 0) return;
+
+    const assetVersionKey = `${latestNarrationAsset.id}:${latestNarrationAsset.updated_at}`;
+    if (autoAppliedNarrationKeyByPlanId[selectedPlan.id] === assetVersionKey) return;
+
+    const result = applyNarrationSplitsToPlan({ plan: selectedPlan, segments });
+    if (!result) {
+      setAutoAppliedNarrationKeyByPlanId(prev => ({ ...prev, [selectedPlan.id]: assetVersionKey }));
+      return;
+    }
+
+    if (result.changed === 0) {
+      setAutoAppliedNarrationKeyByPlanId(prev => ({ ...prev, [selectedPlan.id]: assetVersionKey }));
+      return;
+    }
+
+    updatePlanMutation.mutate(
+      { planAssetId: selectedPlan.id, content: result.nextContent },
+      {
+        onSuccess: () => {
+          setAutoAppliedNarrationKeyByPlanId(prev => ({ ...prev, [selectedPlan.id]: assetVersionKey }));
+          showToast({
+            type: 'success',
+            title: 'Narration applied',
+            message: `Filled Narration (Story) for ${result.applied} shot(s) from the latest narration output.`,
+          });
+        },
+      }
+    );
+  }, [
+    autoAppliedNarrationKeyByPlanId,
+    latestNarrationAsset,
+    selectedPlan,
+    updatePlanMutation,
+  ]);
+
   if (!projectId) {
     return <div className="p-4 text-[var(--text-muted)]">No project selected</div>;
   }
@@ -780,15 +975,12 @@ export function ShotsPage({ projectId }: ShotsPageProps) {
     <>
     <div className="flex flex-col h-full comfy-bg-primary">
       <ShotToolbar
-        projectId={projectId}
         shot={selectedShot}
         onAddShot={selectedPlan ? handleAddShot : undefined}
         onDeleteShot={selectedPlan ? handleDeleteShot : undefined}
         canDeleteShot={Boolean(selectedPlan && selectedShot.id)}
         isMutating={updatePlanMutation.isPending}
         onPreview={shots.length > 0 ? () => setShowPreview(true) : undefined}
-        onExport={onExportTrigger}
-        isExporting={isExporting}
       />
       <div className="flex flex-1 overflow-hidden">
         <div className="w-[280px] border-r border-comfy-border flex-shrink-0 overflow-hidden">
@@ -811,6 +1003,7 @@ export function ShotsPage({ projectId }: ShotsPageProps) {
             <ShotEditor 
               projectId={projectId} 
               shot={selectedShot} 
+              shots={shots}
               onSave={handleUpdateShot}
               isMutating={updatePlanMutation.isPending}
             />
@@ -828,9 +1021,6 @@ export function ShotsPage({ projectId }: ShotsPageProps) {
         projectId={projectId}
         initialShotId={selectedShot?.id}
         onClose={() => setShowPreview(false)}
-        onExport={onExportTrigger}
-        isExporting={isExporting}
-        activeJob={activeJob}
       />
     )}
     </>

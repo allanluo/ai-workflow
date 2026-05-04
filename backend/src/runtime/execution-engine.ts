@@ -75,6 +75,7 @@ function getRetryPolicyForNode(nodeType: string): RetryPolicy {
     llm: 'retry_with_backoff',
     tts: 'retry_with_backoff',
     text_to_speech: 'retry_with_backoff',
+    generate_narration: 'retry_with_backoff',
     image: 'retry_with_backoff',
     image_generation: 'retry_with_backoff',
     generate_image: 'retry_with_backoff',
@@ -397,6 +398,8 @@ async function executeLLMNode(
   );
 
   const rawText = response.response;
+  const debugFinalPrompt =
+    finalPrompt.length > 8000 ? `${finalPrompt.slice(0, 8000)}\n…(truncated)` : finalPrompt;
 
   // Try to parse as JSON if the prompt asks for JSON output
   if (baseInstructions.toLowerCase().includes('json')) {
@@ -433,7 +436,14 @@ async function executeLLMNode(
         }
       }
 
-      return { ...parsed, _raw: rawText };
+      return {
+        ...parsed,
+        _raw: rawText,
+        _debug: {
+          model,
+          final_prompt: debugFinalPrompt,
+        },
+      };
     } catch {
       // Try to extract JSON from markdown code blocks
       const jsonMatch = rawText.match(/```(?:json)?\s*([\s\S]*?)```/);
@@ -466,7 +476,14 @@ async function executeLLMNode(
             }
           }
 
-          return { ...parsed, _raw: rawText };
+          return {
+            ...parsed,
+            _raw: rawText,
+            _debug: {
+              model,
+              final_prompt: debugFinalPrompt,
+            },
+          };
         } catch {}
       }
       // Try to extract JSON from plain text using regex
@@ -500,7 +517,14 @@ async function executeLLMNode(
             }
           }
 
-          return { ...parsed, _raw: rawText };
+          return {
+            ...parsed,
+            _raw: rawText,
+            _debug: {
+              model,
+              final_prompt: debugFinalPrompt,
+            },
+          };
         } catch {}
       }
       // If all JSON parsing fails, return as text
@@ -511,6 +535,10 @@ async function executeLLMNode(
   return {
     text: rawText,
     model: response.model,
+    _debug: {
+      model,
+      final_prompt: debugFinalPrompt,
+    },
   };
 }
 
@@ -520,40 +548,541 @@ async function executeTTSNode(
 ): Promise<Record<string, unknown>> {
   const innerParams = (snapshot.params as Record<string, unknown>) || {};
   const text = typeof innerParams.text === 'string' ? innerParams.text : '';
-  const template =
-    typeof innerParams.template === 'string' ? innerParams.template : config.defaults.tts_voice;
+  const rawTemplate = typeof innerParams.template === 'string' ? innerParams.template.trim() : '';
+  const provider =
+    innerParams.provider === 'piper' || innerParams.provider === 'cosyvoice'
+      ? (innerParams.provider as 'piper' | 'cosyvoice')
+      : config.defaults.tts_provider;
+  const prompt_text = typeof innerParams.prompt_text === 'string' ? innerParams.prompt_text : undefined;
+  const prompt_wav = typeof innerParams.prompt_wav === 'string' ? innerParams.prompt_wav : undefined;
+  const model_dir = typeof innerParams.model_dir === 'string' ? innerParams.model_dir : undefined;
 
   if (!text) {
     throw new Error("TTS node requires a 'text' parameter");
   }
 
-  const response = await executeWithRetry(
-    () =>
-      adapters.generateSpeech({
-        text,
-        template,
-        speed: typeof innerParams.speed === 'number' ? innerParams.speed : 1.0,
-        volume: typeof innerParams.volume === 'number' ? innerParams.volume : 1.0,
-      }),
-    getRetryPolicyForNode('tts')
-  );
+  const splitSentences = (input: string) => {
+    const matches = input.match(/[^.!?]+[.!?]+(\s+|$)|[^.!?]+$/g);
+    return (matches ?? []).map(s => s.trim()).filter(Boolean);
+  };
 
-  const job = await pollJobUntilComplete(response.job_id, {
-    pollIntervalMs: 2000,
-    onStatusChange: status => {
-      console.log(`[Node ${nodeRunId}] TTS job ${response.job_id} status: ${status}`);
-    },
-  });
+  const splitTextForTTS = (input: string, maxChars: number) => {
+    const normalized = input.replace(/\r\n/g, '\n').trim();
+    if (normalized.length <= maxChars) return [normalized];
 
-  if (job.status === 'failed' || job.status === 'error') {
-    throw new Error(`TTS job failed: ${JSON.stringify(job.artifacts)}`);
+    const paragraphs = normalized
+      .split(/\n{2,}/)
+      .map(p => p.trim())
+      .filter(Boolean);
+
+    const units = paragraphs.length > 1 ? paragraphs : splitSentences(normalized);
+
+    const chunks: string[] = [];
+    let current = '';
+    for (const unit of units) {
+      const candidate = current ? `${current}\n\n${unit}` : unit;
+      if (candidate.length <= maxChars) {
+        current = candidate;
+        continue;
+      }
+
+      if (current) {
+        chunks.push(current);
+        current = '';
+      }
+
+      if (unit.length <= maxChars) {
+        current = unit;
+        continue;
+      }
+
+      // Fallback: hard split very long single units.
+      for (let i = 0; i < unit.length; i += maxChars) {
+        chunks.push(unit.slice(i, i + maxChars));
+      }
+    }
+    if (current) chunks.push(current);
+    return chunks;
+  };
+
+  // The local TTS API supports Piper and CosyVoice templates (e.g. `zero_shot_prompt.wav`, `f1.mp3`).
+  // Some older workflows used OpenAI-style voice names like "alloy"; CosyVoice will fail trying to
+  // resolve them as filenames. When provider is CosyVoice (or default), fall back to DEFAULT_TTS_VOICE.
+  const looksLikeCosyVoiceTemplate = (value: string) => /\.(wav|mp3)$/i.test(value);
+  const assumeCosyVoice = provider === 'cosyvoice';
+  const template =
+    assumeCosyVoice
+      ? rawTemplate && !looksLikeCosyVoiceTemplate(rawTemplate)
+        ? (console.warn(
+            `[Node ${nodeRunId}] Invalid CosyVoice template "${rawTemplate}", falling back to default "${config.defaults.tts_voice}"`
+          ),
+          config.defaults.tts_voice)
+        : (rawTemplate || config.defaults.tts_voice)
+      : (rawTemplate || config.defaults.piper_tts_voice);
+
+  const maxCharsPerChunk =
+    typeof (innerParams as any).max_chars_per_chunk === 'number'
+      ? Math.max(200, Math.min(20000, (innerParams as any).max_chars_per_chunk))
+      : 3500;
+  const textChunks = splitTextForTTS(text, maxCharsPerChunk);
+
+  const makeSpeechJob = async (chunkText: string) => {
+    const response = await executeWithRetry(
+      () =>
+        adapters.generateSpeech({
+          text: chunkText,
+          template,
+          provider,
+          speed: typeof innerParams.speed === 'number' ? innerParams.speed : 1.0,
+          volume: typeof innerParams.volume === 'number' ? innerParams.volume : 1.0,
+          prompt_text,
+          prompt_wav,
+          model_dir,
+        }),
+      getRetryPolicyForNode('tts')
+    );
+
+    const job = await pollJobUntilComplete(response.job_id, {
+      pollIntervalMs: 2000,
+      onStatusChange: status => {
+        console.log(`[Node ${nodeRunId}] TTS job ${response.job_id} status: ${status}`);
+      },
+    });
+
+    if (job.status === 'failed' || job.status === 'error') {
+      throw new Error(`TTS job failed: ${JSON.stringify(job.artifacts)}`);
+    }
+
+    return {
+      job_id: response.job_id,
+      status: job.status,
+      audio_path: response.audio_path,
+      audio_url: response.audio_url,
+      text_used: chunkText,
+    };
+  };
+
+  if (textChunks.length > 1) {
+    console.log(
+      `[Node ${nodeRunId}] TTS chunking enabled: ${textChunks.length} segment(s) at ~${maxCharsPerChunk} chars`
+    );
+    const segments = [];
+    for (const chunkText of textChunks) {
+      segments.push(await makeSpeechJob(chunkText));
+    }
+
+    const first = segments[0] as any;
+    return {
+      text_used: text,
+      text_used_segments: textChunks,
+      audio_segments: segments,
+      audio_path: first.audio_path,
+      audio_url: first.audio_url,
+      job_id: first.job_id,
+      status: 'completed',
+    };
+  }
+
+  const single = await makeSpeechJob(textChunks[0]!);
+
+  return {
+    text_used: text,
+    audio_path: single.audio_path,
+    audio_url: single.audio_url,
+    job_id: single.job_id,
+    status: single.status,
+  };
+}
+
+async function executeNarrationNode(
+  snapshot: Record<string, unknown>,
+  nodeRunId: string
+): Promise<Record<string, unknown>> {
+  const innerParams = (snapshot.params as Record<string, unknown>) || {};
+  const baseText = typeof innerParams.text === 'string' ? innerParams.text : '';
+
+  if (!baseText) {
+    throw new Error("Narration node requires a 'text' parameter");
+  }
+
+  type ShotRef = {
+    scene_index: number;
+    scene_title?: string;
+    shot_number?: number | string;
+    shot_id?: string;
+    order: number;
+  };
+
+  const extractShotsFromShotPlan = (): ShotRef[] => {
+    const resolved = snapshot.resolved_input as Record<string, unknown> | undefined;
+    const projectId = typeof snapshot.project_id === 'string' ? snapshot.project_id : null;
+    if ((!resolved || typeof resolved !== 'object') && !projectId) return [];
+
+    const tryParseWrappedJson = (value: unknown) => {
+      if (typeof value !== 'string') return null;
+      const trimmed = value.trim();
+      if (!trimmed) return null;
+      if (!(trimmed.startsWith('{') && trimmed.endsWith('}'))) return null;
+      try {
+        const parsed = JSON.parse(trimmed);
+        return parsed && typeof parsed === 'object' ? (parsed as any) : null;
+      } catch {
+        return null;
+      }
+    };
+
+    const collectFromPlanObject = (planObj: any, fallbackPlanId?: string) => {
+      const refs: ShotRef[] = [];
+      let order = 0;
+
+      const pushShotRef = (shot: any, sceneIndex?: number, sceneTitle?: string) => {
+        if (!shot || typeof shot !== 'object') return;
+        const localOrder = order++;
+        const explicitId = typeof shot.id === 'string' ? shot.id : undefined;
+        const fallbackId = fallbackPlanId ? `${fallbackPlanId}:${localOrder}` : undefined;
+        refs.push({
+          scene_index: typeof sceneIndex === 'number' ? sceneIndex + 1 : 1,
+          scene_title: sceneTitle,
+          shot_number:
+            typeof shot.shot_number === 'number' || typeof shot.shot_number === 'string'
+              ? shot.shot_number
+              : typeof shot.shotNumber === 'number' || typeof shot.shotNumber === 'string'
+                ? shot.shotNumber
+                : typeof shot.shot === 'number' || typeof shot.shot === 'string'
+                  ? shot.shot
+                  : undefined,
+          shot_id: explicitId ?? fallbackId,
+          order: localOrder,
+        });
+      };
+
+      if (Array.isArray(planObj?.scenes)) {
+        const scenes = planObj.scenes.filter((s: any) => s && typeof s === 'object') as any[];
+        for (let sceneIndex = 0; sceneIndex < scenes.length; sceneIndex += 1) {
+          const scene = scenes[sceneIndex] as any;
+          const sceneTitle = typeof scene.title === 'string' ? scene.title : undefined;
+          if (!Array.isArray(scene.shots)) continue;
+
+          const shots = scene.shots.filter((s: any) => s && typeof s === 'object') as any[];
+          shots.sort((a, b) => {
+            const aNum =
+              typeof a.shot_number === 'number'
+                ? a.shot_number
+                : typeof a.shotNumber === 'number'
+                  ? a.shotNumber
+                  : NaN;
+            const bNum =
+              typeof b.shot_number === 'number'
+                ? b.shot_number
+                : typeof b.shotNumber === 'number'
+                  ? b.shotNumber
+                  : NaN;
+            if (Number.isFinite(aNum) && Number.isFinite(bNum)) return aNum - bNum;
+            if (Number.isFinite(aNum)) return -1;
+            if (Number.isFinite(bNum)) return 1;
+            return 0;
+          });
+
+          for (const shot of shots) {
+            pushShotRef(shot, sceneIndex, sceneTitle);
+          }
+        }
+      } else if (Array.isArray(planObj?.shots)) {
+        const shots = planObj.shots.filter((s: any) => s && typeof s === 'object') as any[];
+        shots.sort((a, b) => {
+          const aNum =
+            typeof a.shot_number === 'number'
+              ? a.shot_number
+              : typeof a.shotNumber === 'number'
+                ? a.shotNumber
+                : NaN;
+          const bNum =
+            typeof b.shot_number === 'number'
+              ? b.shot_number
+              : typeof b.shotNumber === 'number'
+                ? b.shotNumber
+                : NaN;
+          if (Number.isFinite(aNum) && Number.isFinite(bNum)) return aNum - bNum;
+          if (Number.isFinite(aNum)) return -1;
+          if (Number.isFinite(bNum)) return 1;
+          return 0;
+        });
+        for (const shot of shots) pushShotRef(shot, 0, undefined);
+      }
+
+      return refs;
+    };
+
+    const resolvedValues = resolved && typeof resolved === 'object' ? Object.values(resolved) : [];
+    for (const prev of resolvedValues) {
+      if (!prev || typeof prev !== 'object') continue;
+      const prevObj = prev as any;
+
+      const directRefs = collectFromPlanObject(prevObj);
+      if (directRefs.length > 0) return directRefs;
+
+      // Many LLM nodes wrap JSON in `text` or `_raw`. Try to parse so narration splitting still works
+      // even when upstream parsing failed.
+      const parsed =
+        tryParseWrappedJson(prevObj.text) ??
+        tryParseWrappedJson(prevObj._raw) ??
+        tryParseWrappedJson(prevObj.prompt_used) ??
+        null;
+      if (parsed) {
+        const wrappedRefs = collectFromPlanObject(parsed);
+        if (wrappedRefs.length > 0) return wrappedRefs;
+      }
+    }
+
+    // Fallback: pull the latest shot plan from the project if edges were not wired.
+    if (projectId) {
+      const assets = listAssets(projectId).filter(a => a.status !== 'deprecated');
+      const candidates = assets
+        .filter(a =>
+          ['shot_plan', 'storyboard', 'scene_batch', 'generated_text'].includes((a as any).asset_type)
+        )
+        .sort((a: any, b: any) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+
+      for (const asset of candidates) {
+        const content = (asset as any).current_version?.content;
+        if (!content || typeof content !== 'object') continue;
+        const planId = typeof (asset as any).id === 'string' ? String((asset as any).id) : undefined;
+        const refs = collectFromPlanObject(content, planId);
+        if (refs.length > 0) return refs;
+
+        const parsed = tryParseWrappedJson((content as any).text) ?? tryParseWrappedJson((content as any)._raw);
+        if (parsed) {
+          const parsedRefs = collectFromPlanObject(parsed, planId);
+          if (parsedRefs.length > 0) return parsedRefs;
+        }
+      }
+    }
+
+    return [];
+  };
+
+  const splitTextIntoParts = (input: string, parts: number) => {
+    const text = input.replace(/\r\n/g, '\n');
+    const normalized = text.trim();
+    if (!normalized) return [];
+    if (parts <= 1) return [normalized];
+    if (parts >= normalized.length) {
+      // Degenerate: too many parts. Return single-char-ish chunks.
+      return Array.from({ length: parts }, (_, i) => normalized[i] ?? '').map(s => s.trim()).filter(Boolean);
+    }
+
+    const isBoundaryAt = (idx: number) => {
+      const c = normalized[idx];
+      if (!c) return false;
+      if (c === '\n' && normalized[idx + 1] === '\n') return true;
+      if (c === '.' || c === '!' || c === '?') {
+        const next = normalized[idx + 1];
+        return next === undefined || /\s/.test(next);
+      }
+      return false;
+    };
+
+    const findBoundaryNear = (approx: number, start: number) => {
+      const searchWindow = 320;
+      const max = normalized.length - 1;
+      const forwardLimit = Math.min(max, approx + searchWindow);
+      for (let i = approx; i <= forwardLimit; i += 1) {
+        if (i <= start) continue;
+        if (isBoundaryAt(i)) return i + 1;
+      }
+      const backwardLimit = Math.max(start + 1, approx - searchWindow);
+      for (let i = approx; i >= backwardLimit; i -= 1) {
+        if (i <= start) continue;
+        if (isBoundaryAt(i)) return i + 1;
+      }
+      return Math.min(normalized.length, Math.max(start + 1, approx));
+    };
+
+    const target = Math.ceil(normalized.length / parts);
+    const segments: string[] = [];
+    let start = 0;
+    for (let i = 0; i < parts; i += 1) {
+      if (start >= normalized.length) break;
+      if (i === parts - 1) {
+        segments.push(normalized.slice(start).trim());
+        break;
+      }
+      const approx = Math.min(normalized.length - 1, start + target);
+      const end = findBoundaryNear(approx, start);
+      const slice = normalized.slice(start, end).trim();
+      if (slice) segments.push(slice);
+      start = end;
+    }
+
+    // Ensure we return exactly `parts` entries (pad empties if needed).
+    while (segments.length < parts) segments.push('');
+    return segments.slice(0, parts);
+  };
+
+  const extractNarrationFromShotPlan = (): string | null => {
+    const resolved = snapshot.resolved_input as Record<string, unknown> | undefined;
+    if (!resolved || typeof resolved !== 'object') return null;
+
+    const collected: Array<{ order: number; text: string }> = [];
+    let orderCounter = 0;
+
+    const addNarration = (value: unknown) => {
+      if (typeof value !== 'string') return;
+      const text = value.trim();
+      if (!text) return;
+      collected.push({ order: orderCounter++, text });
+    };
+
+    for (const prev of Object.values(resolved)) {
+      if (!prev || typeof prev !== 'object') continue;
+      const prevObj = prev as any;
+
+      // Preferred: scenes -> shots -> narration
+      if (Array.isArray(prevObj.scenes)) {
+        for (const scene of prevObj.scenes) {
+          if (!scene || typeof scene !== 'object') continue;
+          const sceneObj = scene as any;
+          if (!Array.isArray(sceneObj.shots)) continue;
+
+          const shots = [...sceneObj.shots].filter(s => s && typeof s === 'object') as any[];
+          shots.sort((a, b) => {
+            const aNum = typeof a.shot_number === 'number' ? a.shot_number : typeof a.shotNumber === 'number' ? a.shotNumber : NaN;
+            const bNum = typeof b.shot_number === 'number' ? b.shot_number : typeof b.shotNumber === 'number' ? b.shotNumber : NaN;
+            if (Number.isFinite(aNum) && Number.isFinite(bNum)) return aNum - bNum;
+            if (Number.isFinite(aNum)) return -1;
+            if (Number.isFinite(bNum)) return 1;
+            return 0;
+          });
+
+          for (const shot of shots) {
+            addNarration(shot.narration);
+          }
+        }
+      }
+
+      // Legacy: top-level shots -> narration
+      if (Array.isArray(prevObj.shots)) {
+        for (const shot of prevObj.shots) {
+          if (!shot || typeof shot !== 'object') continue;
+          addNarration((shot as any).narration);
+        }
+      }
+    }
+
+    if (collected.length === 0) return null;
+    return collected
+      .sort((a, b) => a.order - b.order)
+      .map(item => item.text)
+      .join('\n\n');
+  };
+
+  const extractSourceStoryText = (): string | null => {
+    const resolved = snapshot.resolved_input as Record<string, unknown> | undefined;
+    const projectId = typeof snapshot.project_id === 'string' ? snapshot.project_id : null;
+    if ((!resolved || typeof resolved !== 'object') && !projectId) return null;
+
+    let best: string | null = null;
+    let bestScore = -1;
+
+    const entries = resolved && typeof resolved === 'object' ? Object.entries(resolved) : [];
+    for (const [key, prev] of entries) {
+      if (!prev || typeof prev !== 'object') continue;
+      const text = typeof (prev as any).text === 'string' ? String((prev as any).text).trim() : '';
+      if (!text) continue;
+      const keyScore = /story/i.test(key) ? 1000000 : 0;
+      const score = keyScore + text.length;
+      if (score > bestScore) {
+        bestScore = score;
+        best = text;
+      }
+    }
+
+    if (best) return best;
+
+    if (projectId) {
+      const story = listAssets(projectId, { asset_type: 'source_story' })[0] as any;
+      const content = story?.current_version?.content;
+      if (content && typeof content === 'object' && typeof content.text === 'string') {
+        return String(content.text).trim() || null;
+      }
+    }
+
+    return null;
+  };
+
+  // Many templates use `generate_narration` with `runtimeType: tts` but the intended behavior
+  // for the narration node is planning/splitting only. It should populate per-shot narration text,
+  // not generate audio. If the node contains an LLM-style instruction, we still run the LLM pass to
+  // obtain narration text, but we never call TTS from this node.
+  let narrationText = baseText;
+  const looksLikeNarrationPlanner =
+    baseText.toLowerCase().includes('output only valid json') &&
+    baseText.toLowerCase().includes('"narration"');
+
+  const splitByShot = (innerParams as any).split_by_shot !== false;
+  const storyText = extractSourceStoryText();
+  const shots = extractShotsFromShotPlan();
+
+  if (looksLikeNarrationPlanner) {
+    const fromStory = storyText;
+
+    // Preferred behavior: keep the source story text intact, and ONLY split it into shot-aligned
+    // chunks. This avoids the shot plan paraphrasing/omitting story content.
+    const fromShotPlan = extractNarrationFromShotPlan();
+    if (fromShotPlan) narrationText = fromShotPlan;
+    else if (fromStory) narrationText = fromStory;
+  }
+
+  if (looksLikeNarrationPlanner && narrationText === baseText) {
+    const llmSnapshot = {
+      ...snapshot,
+      params: {
+        ...innerParams,
+        prompt: baseText,
+      },
+    };
+
+    const llmOut = await executeLLMNode(llmSnapshot, nodeRunId);
+    const candidate = typeof (llmOut as any)?.narration === 'string' ? String((llmOut as any).narration) : '';
+    narrationText = candidate.trim();
+    if (!narrationText) {
+      throw new Error("Narration planner did not return a 'narration' string");
+    }
+  }
+
+  const narrationSource = (storyText || narrationText || '').trim();
+
+  // Primary behavior: keep the source story text intact, and ONLY split it into shot-aligned chunks.
+  // This avoids the shot plan paraphrasing/omitting story content and keeps narration generation
+  // decoupled from audio generation in the Shots tab.
+  if (splitByShot && narrationSource && shots.length > 0) {
+    const narrationSegments = splitTextIntoParts(narrationSource, shots.length);
+    const voiceover_segments: Array<Record<string, unknown>> = [];
+
+    for (let i = 0; i < shots.length; i += 1) {
+      const segmentText = narrationSegments[i] ?? '';
+      const shot = shots[i]!;
+      if (!segmentText.trim()) continue;
+
+      voiceover_segments.push({
+        ...shot,
+        text: segmentText,
+        order: i,
+        status: 'ready',
+      });
+    }
+
+    return {
+      narration: narrationSource,
+      narration_segments: narrationSegments,
+      voiceover_segments,
+      status: 'completed',
+    };
   }
 
   return {
-    audio_path: response.audio_path,
-    audio_url: response.audio_url,
-    job_id: response.job_id,
-    status: job.status,
+    narration: narrationSource || narrationText,
+    status: 'completed',
   };
 }
 
@@ -562,10 +1091,144 @@ async function executeImageNode(
   nodeRunId: string
 ): Promise<Record<string, unknown>> {
   const innerParams = (snapshot.params as Record<string, unknown>) || {};
-  const prompt = typeof innerParams.prompt === 'string' ? innerParams.prompt : '';
+  const basePrompt = typeof innerParams.prompt === 'string' ? innerParams.prompt : '';
 
-  if (!prompt) {
+  if (!basePrompt) {
     throw new Error("Image node requires a 'prompt' parameter");
+  }
+
+  // Many templates currently store an *LLM instruction* in the image node prompt
+  // (e.g., "Output ONLY valid JSON" with an `image_description` field). If we pass that
+  // directly to the image model, it will often generate generic/incorrect frames.
+  // Instead, first run an LLM pass to produce an image description, then send that
+  // description to the image generator.
+  let prompt = basePrompt;
+  const looksLikePromptPlanner =
+    basePrompt.toLowerCase().includes('output only valid json') &&
+    basePrompt.toLowerCase().includes('image_description');
+
+  const extractScenes = (): Array<Record<string, unknown>> => {
+    const resolved = snapshot.resolved_input as Record<string, unknown> | undefined;
+    if (!resolved || typeof resolved !== 'object') return [];
+
+    for (const value of Object.values(resolved)) {
+      if (!value || typeof value !== 'object') continue;
+      const scenes = (value as any).scenes;
+      if (!Array.isArray(scenes)) continue;
+      const cleaned = scenes.filter((s: any) => s && typeof s === 'object') as Array<
+        Record<string, unknown>
+      >;
+      if (cleaned.length > 0) return cleaned;
+    }
+
+    return [];
+  };
+
+  const scenes = extractScenes();
+  const shouldGeneratePerScene =
+    scenes.length > 0 && (innerParams as any).batch_mode !== 'single';
+
+  if (shouldGeneratePerScene) {
+    const maxScenes = typeof (innerParams as any).max_scenes === 'number' ? (innerParams as any).max_scenes : 20;
+    const slice = scenes.slice(0, Math.max(1, Math.min(maxScenes, scenes.length)));
+    if (scenes.length > slice.length) {
+      console.warn(
+        `[Node ${nodeRunId}] generate_image: limiting scenes from ${scenes.length} to ${slice.length}`
+      );
+    }
+
+    const images: Array<Record<string, unknown>> = [];
+
+    for (let index = 0; index < slice.length; index += 1) {
+      const scene = slice[index];
+      const sceneTitle = typeof (scene as any).title === 'string' ? String((scene as any).title) : '';
+
+      let scenePrompt = basePrompt;
+      if (looksLikePromptPlanner) {
+        const llmSnapshot: Record<string, unknown> = {
+          ...snapshot,
+          params: {
+            ...innerParams,
+            prompt: `${basePrompt}\n\n### TARGET_SCENE_JSON ###\n${JSON.stringify(scene, null, 2)}`,
+          },
+        };
+        const llmOut = await executeLLMNode(llmSnapshot, nodeRunId);
+        const imageDescription =
+          typeof (llmOut as any)?.image_description === 'string'
+            ? String((llmOut as any).image_description).trim()
+            : '';
+        if (!imageDescription) {
+          throw new Error(`Image prompt planner did not return image_description for scene ${index + 1}`);
+        }
+        scenePrompt = imageDescription;
+      } else {
+        scenePrompt = `${basePrompt}\n\nScene: ${sceneTitle || `Scene ${index + 1}`}\n${JSON.stringify(scene, null, 2)}`;
+      }
+
+      const response = await executeWithRetry(
+        () =>
+          adapters.generateImage({
+            prompt: scenePrompt,
+            width: typeof innerParams.width === 'number' ? innerParams.width : 1024,
+            height: typeof innerParams.height === 'number' ? innerParams.height : 1024,
+          }),
+        getRetryPolicyForNode('image')
+      );
+
+      const job = await pollJobUntilComplete(response.job_id, {
+        pollIntervalMs: 3000,
+        onStatusChange: status => {
+          console.log(
+            `[Node ${nodeRunId}] Image job ${response.job_id} (scene ${index + 1}/${slice.length}) status: ${status}`
+          );
+        },
+      });
+
+      if (job.status === 'failed' || job.status === 'error') {
+        throw new Error(`Image generation failed: ${JSON.stringify(job.artifacts)}`);
+      }
+
+      images.push({
+        scene_index: index,
+        scene_title: sceneTitle,
+        prompt_used: scenePrompt,
+        image_path: response.image_path,
+        image_url: response.image_url,
+        job_id: response.job_id,
+        status: job.status,
+      });
+    }
+
+    const first = images[0] as any;
+    return {
+      images,
+      // Back-compat for callers that still expect a single image.
+      prompt_used: typeof first?.prompt_used === 'string' ? first.prompt_used : undefined,
+      image_path: typeof first?.image_path === 'string' ? first.image_path : undefined,
+      image_url: typeof first?.image_url === 'string' ? first.image_url : undefined,
+      job_id: typeof first?.job_id === 'string' ? first.job_id : undefined,
+      status: 'completed',
+    };
+  }
+
+  if (looksLikePromptPlanner) {
+    try {
+      const llmOut = await executeLLMNode(snapshot, nodeRunId);
+      const imageDescription =
+        typeof (llmOut as any)?.image_description === 'string'
+          ? String((llmOut as any).image_description).trim()
+          : typeof (llmOut as any)?.prompt === 'string'
+            ? String((llmOut as any).prompt).trim()
+            : '';
+      if (imageDescription) {
+        prompt = imageDescription;
+      }
+    } catch (err) {
+      console.warn(
+        `[Node ${nodeRunId}] Failed to build image prompt via LLM; falling back to raw prompt:`,
+        err instanceof Error ? err.message : err
+      );
+    }
   }
 
   const response = await executeWithRetry(
@@ -590,6 +1253,7 @@ async function executeImageNode(
   }
 
   return {
+    prompt_used: prompt,
     image_path: response.image_path,
     image_url: response.image_url,
     job_id: response.job_id,
@@ -643,6 +1307,7 @@ async function executeNode(
   nodeRunId: string
 ): Promise<Record<string, unknown>> {
   const nodeType = getNodeType(node);
+  const innerParams = (snapshot.params as Record<string, unknown>) || {};
 
   try {
     switch (nodeType) {
@@ -654,8 +1319,26 @@ async function executeNode(
         return await executeLLMNode(snapshot, nodeRunId);
 
       case 'tts':
-      case 'text_to_speech':
-        return await executeTTSNode(snapshot, nodeRunId);
+      case 'text_to_speech': {
+        const catalogType =
+          node &&
+          typeof (node as any).data === 'object' &&
+          (node as any).data !== null &&
+          typeof (node as any).data.catalog_type === 'string'
+            ? String((node as any).data.catalog_type)
+            : null;
+
+        const baseText = typeof innerParams.text === 'string' ? innerParams.text : '';
+        const looksLikeNarrationPlanner =
+          baseText.toLowerCase().includes('output only valid json') &&
+          baseText.toLowerCase().includes('"narration"');
+        return catalogType === 'generate_narration' || looksLikeNarrationPlanner
+          ? await executeNarrationNode(snapshot, nodeRunId)
+          : await executeTTSNode(snapshot, nodeRunId);
+      }
+
+      case 'generate_narration':
+        return await executeNarrationNode(snapshot, nodeRunId);
 
       case 'image':
       case 'image_generation':
@@ -727,16 +1410,16 @@ async function executeNode(
         // Return the node's text param as output for the next node
         // Check nested params structure
         const p = snapshot as Record<string, unknown>;
-        const innerParams = (p.params as Record<string, unknown>) || p;
+        const inputParams = (p.params as Record<string, unknown>) || p;
         const textValue =
-          typeof innerParams.text === 'string'
-            ? innerParams.text
-            : typeof innerParams.prompt === 'string'
-              ? innerParams.prompt
+          typeof inputParams.text === 'string'
+            ? inputParams.text
+            : typeof inputParams.prompt === 'string'
+              ? inputParams.prompt
               : '';
         console.log(
-          '[input node] innerParams:',
-          JSON.stringify(innerParams).slice(0, 100),
+          '[input node] inputParams:',
+          JSON.stringify(inputParams).slice(0, 100),
           '-> textValue:',
           textValue?.slice(0, 50)
         );
@@ -976,6 +1659,7 @@ async function executeWorkflowRun(workflowRunId: string) {
           'generate_shot_plan',
           'tts',
           'text_to_speech',
+          'generate_narration',
           'image',
           'image_generation',
           'generate_image',

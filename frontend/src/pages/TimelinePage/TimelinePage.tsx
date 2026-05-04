@@ -82,7 +82,7 @@ export function TimelinePage({ projectId }: TimelinePageProps) {
       <div className="flex flex-col h-full comfy-bg-primary items-center justify-center">
         <p className="text-[var(--text-muted)]">No outputs yet.</p>
         <p className="text-sm text-[var(--text-muted)]">
-          Create an output in the Outputs tab first.
+          Create an output first.
         </p>
       </div>
     );

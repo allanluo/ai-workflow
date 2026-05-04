@@ -1,6 +1,7 @@
 import {
   archiveProject,
   createProject,
+  deleteProject,
   getProjectById,
   listProjects,
   updateProject
@@ -109,27 +110,25 @@ export async function registerProjectRoutes(app: FastifyInstance) {
 
   app.delete("/projects/:projectId", async (request, reply) => {
     const params = z.object({ projectId: z.string() }).parse(request.params);
-    const archived = archiveProject(params.projectId);
+    const query = z.object({ hard: z.string().optional() }).parse(request.query);
+    const isHard = query.hard === "true";
 
-    if (!archived) {
-      reply.code(404);
-      return {
-        ok: false,
-        data: null,
-        error: {
-          code: "not_found",
-          message: `Project ${params.projectId} was not found`
-        }
-      };
+    if (isHard) {
+      const deleted = deleteProject(params.projectId);
+      if (!deleted) {
+        reply.code(404);
+        return { ok: false, data: null, error: { code: "not_found", message: "Project not found" } };
+      }
+      return { ok: true, data: { success: true }, error: null };
     }
 
-    return {
-      ok: true,
-      data: {
-        project: archived
-      },
-      error: null
-    };
+    const archived = archiveProject(params.projectId);
+    if (!archived) {
+      reply.code(404);
+      return { ok: false, data: null, error: { code: "not_found", message: "Project not found" } };
+    }
+
+    return { ok: true, data: { project: archived }, error: null };
   });
 }
 

@@ -251,6 +251,16 @@ export async function fetchProjectById(projectId: string): Promise<Project> {
   return payload.data.project;
 }
 
+export async function deleteProject(projectId: string): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/projects/${projectId}?hard=true`, {
+    method: 'DELETE',
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to delete project: ${response.status}`);
+  }
+}
+
 export async function createProject(input: {
   title: string;
   description: string;
@@ -718,7 +728,22 @@ export async function fetchProjectWorkflows(projectId: string): Promise<Workflow
     data: { items: WorkflowDefinition[] };
   };
 
-  return payload.data.items;
+  const items = payload.data.items ?? [];
+  const filtered = items.filter(w => w.project_id === projectId);
+
+  if (filtered.length !== items.length) {
+    console.warn('[fetchProjectWorkflows] Dropped workflows with mismatched project_id', {
+      requestedProjectId: projectId,
+      total: items.length,
+      kept: filtered.length,
+      dropped: items
+        .filter(w => w.project_id !== projectId)
+        .slice(0, 5)
+        .map(w => ({ id: w.id, project_id: w.project_id, title: w.title })),
+    });
+  }
+
+  return filtered;
 }
 
 export async function fetchWorkflowById(workflowId: string): Promise<WorkflowDefinition> {

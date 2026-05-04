@@ -2,20 +2,43 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { Shot } from './ShotsPage';
 import { API_BASE_URL } from '../../lib/api';
-import { type ExportJob } from '../../lib/api/useQuickExport';
+import { useQuickExport, type StoryboardExportSegment } from '../../lib/api/useQuickExport';
 
 interface StoryboardPreviewModalProps {
   shots: Shot[];
   projectId: string;
   initialShotId?: string;
   onClose: () => void;
-  onExport?: () => void;
-  isExporting?: boolean;
-  activeJob?: ExportJob | null;
-  exportError?: string | null;
 }
 
 type MediaMap = Record<string, { imageUrl?: string; videoUrl?: string }>; // shotId -> media
+type StoredAudioMap = Record<string, { audioUrl?: string }>;
+
+function resolveMaybeRelativeUrl(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const url = value.trim();
+  if (!url) return null;
+  if (url.startsWith('http://') || url.startsWith('https://')) return url;
+  if (url.startsWith('/')) {
+    try {
+      return new URL(url, API_BASE_URL).toString();
+    } catch {
+      return url;
+    }
+  }
+  return url;
+}
+
+const getStoredMap = (storageKey: string) => {
+  try {
+    const raw = window.localStorage.getItem(storageKey);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && 'items' in parsed ? (parsed.items ?? {}) : parsed;
+  } catch {
+    return null;
+  }
+};
 
 const getStoredMediaMap = (projectId: string): MediaMap => {
   try {
@@ -38,18 +61,46 @@ const getStoredMediaMap = (projectId: string): MediaMap => {
   }
 };
 
+const getStoredShotAudioMap = (projectId: string): StoredAudioMap => {
+  const next: StoredAudioMap = {};
+
+  const narrationItems = getStoredMap(`aiwf:shotNarrationAudio:${projectId}`);
+  if (narrationItems && typeof narrationItems === 'object') {
+    for (const [shotId, item] of Object.entries(narrationItems as Record<string, unknown>)) {
+      if (!item || typeof item !== 'object') continue;
+      const url =
+        resolveMaybeRelativeUrl((item as Record<string, unknown>).audioUrl) ??
+        resolveMaybeRelativeUrl((item as Record<string, unknown>).audio_url);
+      if (url) next[shotId] = { audioUrl: url };
+    }
+  }
+
+  const voiceOverItems = getStoredMap(`aiwf:shotVoiceover:${projectId}`);
+  if (voiceOverItems && typeof voiceOverItems === 'object') {
+    for (const [shotId, item] of Object.entries(voiceOverItems as Record<string, unknown>)) {
+      if (!item || typeof item !== 'object') continue;
+      const url =
+        resolveMaybeRelativeUrl((item as Record<string, unknown>).audioUrl) ??
+        resolveMaybeRelativeUrl((item as Record<string, unknown>).audio_url);
+      if (url) next[shotId] = { audioUrl: url };
+    }
+  }
+
+  return next;
+};
+
 export function StoryboardPreviewModal({
   shots,
   projectId,
   initialShotId,
   onClose,
-  onExport,
-  isExporting = false,
-  activeJob = null,
 }: StoryboardPreviewModalProps) {
+  const { handleStoryboardExport, isExporting, activeJob } = useQuickExport(projectId);
   const mediaMap = useMemo(() => getStoredMediaMap(projectId), [projectId]);
-  const [preferredView, setPreferredView] = useState<'image' | 'video'>('image');
+  const audioMap = useMemo(() => getStoredShotAudioMap(projectId), [projectId]);
+  const [preferredView, setPreferredView] = useState<'image' | 'video' | 'slideshow'>('image');
   const [isAutoPlay, setIsAutoPlay] = useState(false);
+  const [isSlideshowPlaying, setIsSlideshowPlaying] = useState(false);
 
   const initialIndex = useMemo(() => {
     if (!initialShotId) return 0;
@@ -93,8 +144,71 @@ export function StoryboardPreviewModal({
 
   const imageUrl = activeShot ? mediaMap[activeShot.id]?.imageUrl : undefined;
   const videoUrl = activeShot ? mediaMap[activeShot.id]?.videoUrl : undefined;
+  const audioUrl = activeShot ? audioMap[activeShot.id]?.audioUrl : undefined;
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const exportSegments = useMemo(() => {
+    const segments: StoryboardExportSegment[] = [];
+    for (const shot of shots) {
+      const media = mediaMap[shot.id];
+      const image = resolveMaybeRelativeUrl(media?.imageUrl);
+      const video = resolveMaybeRelativeUrl(media?.videoUrl);
+      const audio = resolveMaybeRelativeUrl(audioMap[shot.id]?.audioUrl);
+      if (!image && !video) continue;
+      segments.push({
+        shot_id: shot.id,
+        title: shot.title || undefined,
+        image_url: image ?? undefined,
+        video_url: video ?? undefined,
+        audio_url: audio ?? undefined,
+        duration_seconds: audio ? undefined : 3,
+      });
+    }
+    return segments;
+  }, [audioMap, mediaMap, shots]);
+  const canExportNarratedPreview = exportSegments.length > 0;
+  const completedExportDownloadUrl =
+    activeJob?.status === 'completed' ? `${API_BASE_URL}/exports/${activeJob.id}/download` : null;
 
-  const currentView = preferredView === 'video' && videoUrl ? 'video' : 'image';
+  const hasAnyAudio = useMemo(() => shots.some(shot => Boolean(audioMap[shot.id]?.audioUrl)), [audioMap, shots]);
+  const currentView =
+    preferredView === 'video' && videoUrl
+      ? 'video'
+      : preferredView === 'slideshow'
+        ? 'slideshow'
+        : 'image';
+
+  useEffect(() => {
+    if (preferredView !== 'slideshow') {
+      setIsSlideshowPlaying(false);
+      audioRef.current?.pause();
+      return;
+    }
+    if (!isSlideshowPlaying) {
+      audioRef.current?.pause();
+      return;
+    }
+    if (!audioUrl) return;
+
+    const audio = audioRef.current;
+    if (!audio) return;
+    audio.currentTime = 0;
+    audio.play().catch(() => {
+      setIsSlideshowPlaying(false);
+    });
+  }, [activeIndex, audioUrl, isSlideshowPlaying, preferredView]);
+
+  useEffect(() => {
+    if (preferredView !== 'slideshow' || !isSlideshowPlaying || audioUrl) return;
+    if (activeIndex >= shots.length - 1) {
+      setIsSlideshowPlaying(false);
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      setActiveIndex(index => Math.min(shots.length - 1, index + 1));
+    }, 3000);
+    return () => window.clearTimeout(timeout);
+  }, [activeIndex, audioUrl, isSlideshowPlaying, preferredView, shots.length]);
 
   // Group shots by scene for display in film strip
   const sceneGroups = useMemo(() => {
@@ -109,6 +223,13 @@ export function StoryboardPreviewModal({
     });
     return groups;
   }, [shots]);
+
+  const handleExportNarratedPreview = useCallback(async () => {
+    await handleStoryboardExport({
+      title: `Narration Preview ${new Date().toISOString().slice(0, 19).replace('T', ' ')}`,
+      segments: exportSegments,
+    });
+  }, [exportSegments, handleStoryboardExport]);
 
   const content = (
     <div
@@ -131,7 +252,7 @@ export function StoryboardPreviewModal({
           <span style={{ color: '#777', fontSize: 13 }}>
             Shot {activeIndex + 1} of {shots.length}
           </span>
-          {videoUrl && (
+          {(videoUrl || hasAnyAudio) && (
             <>
               <span style={{ color: '#555', fontSize: 13 }}>·</span>
               <div className="flex items-center bg-black/40 rounded-lg p-0.5 border border-white/10">
@@ -150,128 +271,139 @@ export function StoryboardPreviewModal({
                 >
                   Image
                 </button>
-                <button
-                  onClick={() => setPreferredView('video')}
-                  style={{
-                    padding: '4px 10px',
-                    fontSize: 11,
-                    borderRadius: 6,
-                    background: preferredView === 'video' ? 'rgba(91,141,239,1)' : 'transparent',
-                    color: preferredView === 'video' ? '#fff' : '#888',
-                    border: 'none',
-                    cursor: 'pointer',
-                    transition: 'all 0.2s',
-                  }}
-                >
-                  Video
-                </button>
+                {videoUrl ? (
+                  <button
+                    onClick={() => setPreferredView('video')}
+                    style={{
+                      padding: '4px 10px',
+                      fontSize: 11,
+                      borderRadius: 6,
+                      background: preferredView === 'video' ? 'rgba(91,141,239,1)' : 'transparent',
+                      color: preferredView === 'video' ? '#fff' : '#888',
+                      border: 'none',
+                      cursor: 'pointer',
+                      transition: 'all 0.2s',
+                    }}
+                  >
+                    Video
+                  </button>
+                ) : null}
+                {hasAnyAudio ? (
+                  <button
+                    onClick={() => setPreferredView('slideshow')}
+                    style={{
+                      padding: '4px 10px',
+                      fontSize: 11,
+                      borderRadius: 6,
+                      background: preferredView === 'slideshow' ? 'rgba(91,141,239,1)' : 'transparent',
+                      color: preferredView === 'slideshow' ? '#fff' : '#888',
+                      border: 'none',
+                      cursor: 'pointer',
+                      transition: 'all 0.2s',
+                    }}
+                  >
+                    Slideshow
+                  </button>
+                ) : null}
               </div>
-              <span style={{ color: '#555', fontSize: 13 }}>·</span>
-              <button
-                onClick={() => setIsAutoPlay(!isAutoPlay)}
-                style={{
-                  padding: '4px 10px',
-                  fontSize: 11,
-                  borderRadius: 6,
-                  background: isAutoPlay ? 'rgba(91,141,239,1)' : 'rgba(255,255,255,0.06)',
-                  color: isAutoPlay ? '#fff' : '#888',
-                  border: '1px solid rgba(255,255,255,0.1)',
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 6,
-                  transition: 'all 0.2s',
-                }}
-              >
-                <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
-                  <polygon points="5 3 19 12 5 21 5 3" />
-                </svg>
-                {isAutoPlay ? 'Auto-play ON' : 'Auto-play OFF'}
-              </button>
+              {preferredView === 'video' && videoUrl ? (
+                <>
+                  <span style={{ color: '#555', fontSize: 13 }}>·</span>
+                  <button
+                    onClick={() => setIsAutoPlay(!isAutoPlay)}
+                    style={{
+                      padding: '4px 10px',
+                      fontSize: 11,
+                      borderRadius: 6,
+                      background: isAutoPlay ? 'rgba(91,141,239,1)' : 'rgba(255,255,255,0.06)',
+                      color: isAutoPlay ? '#fff' : '#888',
+                      border: '1px solid rgba(255,255,255,0.1)',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      transition: 'all 0.2s',
+                    }}
+                  >
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+                      <polygon points="5 3 19 12 5 21 5 3" />
+                    </svg>
+                    {isAutoPlay ? 'Auto-play ON' : 'Auto-play OFF'}
+                  </button>
+                </>
+              ) : null}
+              {preferredView === 'slideshow' && hasAnyAudio ? (
+                <>
+                  <span style={{ color: '#555', fontSize: 13 }}>·</span>
+                  <button
+                    onClick={() => setIsSlideshowPlaying(playing => !playing)}
+                    style={{
+                      padding: '4px 10px',
+                      fontSize: 11,
+                      borderRadius: 6,
+                      background: isSlideshowPlaying ? 'rgba(91,141,239,1)' : 'rgba(255,255,255,0.06)',
+                      color: isSlideshowPlaying ? '#fff' : '#888',
+                      border: '1px solid rgba(255,255,255,0.1)',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      transition: 'all 0.2s',
+                    }}
+                  >
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+                      {isSlideshowPlaying ? (
+                        <path d="M6 5h4v14H6zM14 5h4v14h-4z" />
+                      ) : (
+                        <polygon points="5 3 19 12 5 21 5 3" />
+                      )}
+                    </svg>
+                    {isSlideshowPlaying ? 'Pause' : 'Play'}
+                  </button>
+                </>
+              ) : null}
             </>
           )}
         </div>
         <div className="flex items-center gap-3">
-          {activeJob?.status === 'completed' ? (
-            <button
-              onClick={() => window.open(`${API_BASE_URL}/exports/${activeJob.id}/download`, '_blank')}
+          {completedExportDownloadUrl ? (
+            <a
+              href={completedExportDownloadUrl}
               style={{
-                padding: '6px 14px',
-                fontSize: 12,
-                fontWeight: 600,
+                background: 'rgba(34,197,94,0.16)',
+                border: '1px solid rgba(34,197,94,0.35)',
                 borderRadius: 8,
-                background: 'rgba(34, 197, 94, 1)',
-                color: '#fff',
-                border: 'none',
+                color: '#86efac',
+                padding: '6px 12px',
                 cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                transition: 'all 0.2s',
-                boxShadow: '0 0 15px rgba(34, 197, 94, 0.3)',
+                fontSize: 13,
+                textDecoration: 'none',
               }}
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                <polyline points="7 10 12 15 17 10" />
-                <line x1="12" y1="15" x2="12" y2="3" />
-              </svg>
-              <span>Download Video</span>
-            </button>
-          ) : onExport && (
-            <button
-              onClick={onExport}
-              disabled={isExporting}
-              style={{
-                padding: '6px 14px',
-                fontSize: 12,
-                fontWeight: 600,
-                borderRadius: 8,
-                background: isExporting ? 'rgba(255,255,255,0.1)' : 'rgba(91,141,239,1)',
-                color: '#fff',
-                border: 'none',
-                cursor: isExporting ? 'not-allowed' : 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                transition: 'all 0.2s',
-                boxShadow: '0 0 15px rgba(91,141,239,0.3)',
-                opacity: isExporting ? 0.6 : 1,
-              }}
-            >
-              {isExporting ? (
-                <>
-                  <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                  <span>
-                    {activeJob && activeJob.status === 'running' 
-                      ? `Exporting... ${activeJob.progress}%` 
-                      : activeJob && activeJob.status === 'failed'
-                        ? 'Export Failed'
-                        : 'Starting...'}
-                  </span>
-                </>
-              ) : activeJob?.status === 'failed' ? (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <span style={{ color: '#ff4d4f', fontSize: 11 }}>{(activeJob as any).error_message || 'Failed to render sequence'}</span>
-                  <button 
-                    onClick={onExport}
-                    style={{ background: 'none', border: 'none', color: '#5b8def', fontSize: 10, cursor: 'pointer', textDecoration: 'underline', padding: 0, textAlign: 'left' }}
-                  >
-                    Try Again
-                  </button>
-                </div>
-              ) : (
-                <>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                    <polyline points="7 10 12 15 17 10" />
-                    <line x1="12" y1="15" x2="12" y2="3" />
-                  </svg>
-                  <span>Export to Video</span>
-                </>
-              )}
-            </button>
-          )}
+              Download MP4
+            </a>
+          ) : null}
+          <button
+            onClick={() => {
+              void handleExportNarratedPreview();
+            }}
+            disabled={!canExportNarratedPreview || isExporting}
+            style={{
+              background: !canExportNarratedPreview
+                ? 'rgba(255,255,255,0.04)'
+                : 'rgba(91,141,239,0.18)',
+              border: '1px solid rgba(91,141,239,0.35)',
+              borderRadius: 8,
+              color: !canExportNarratedPreview ? '#666' : '#cddcff',
+              padding: '6px 12px',
+              cursor: !canExportNarratedPreview || isExporting ? 'not-allowed' : 'pointer',
+              fontSize: 13,
+            }}
+          >
+            {isExporting
+              ? `Exporting${activeJob ? ` ${Math.max(0, Math.round(activeJob.progress || 0))}%` : '...'}`
+              : 'Export Narration Preview'}
+          </button>
         </div>
         <button
           onClick={onClose}
@@ -430,6 +562,60 @@ export function StoryboardPreviewModal({
           )}
         </div>
 
+        {currentView === 'slideshow' ? (
+          <div
+            style={{
+              position: 'absolute',
+              left: '50%',
+              bottom: 24,
+              transform: 'translateX(-50%)',
+              width: 'min(900px, calc(100% - 160px))',
+              zIndex: 12,
+            }}
+          >
+            <div
+              style={{
+                background: 'rgba(8,8,12,0.88)',
+                border: '1px solid rgba(255,255,255,0.08)',
+                borderRadius: 12,
+                padding: 12,
+                boxShadow: '0 20px 40px rgba(0,0,0,0.45)',
+                backdropFilter: 'blur(10px)',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                <div>
+                  <div style={{ color: '#e0e0e0', fontSize: 12, fontWeight: 600 }}>Shot Audio</div>
+                  <div style={{ color: '#777', fontSize: 11 }}>
+                    {audioUrl ? 'Voice-over / narration loaded for this shot' : 'No shot audio found; advancing on timer'}
+                  </div>
+                </div>
+                <div style={{ color: '#777', fontSize: 11 }}>
+                  {isSlideshowPlaying ? 'Slideshow active' : 'Slideshow paused'}
+                </div>
+              </div>
+              {audioUrl ? (
+                <audio
+                  ref={audioRef}
+                  key={`audio-${activeShot?.id}`}
+                  src={audioUrl}
+                  controls
+                  onEnded={() => {
+                    if (!isSlideshowPlaying) return;
+                    if (activeIndex < shots.length - 1) {
+                      goNext();
+                    } else {
+                      setIsSlideshowPlaying(false);
+                    }
+                  }}
+                  className="w-full"
+                  style={{ marginTop: 10 }}
+                />
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+
         {/* Next button */}
         <button
           onClick={goNext}
@@ -574,6 +760,29 @@ export function StoryboardPreviewModal({
                           VIDEO
                         </div>
                       )}
+                      {audioMap[shot.id]?.audioUrl ? (
+                        <div
+                          style={{
+                            position: 'absolute',
+                            top: 2,
+                            left: 3,
+                            background: 'rgba(0,0,0,0.72)',
+                            color: '#fff',
+                            fontSize: 8,
+                            fontWeight: 800,
+                            padding: '1px 3px',
+                            borderRadius: 3,
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 2,
+                          }}
+                        >
+                          <svg width="6" height="6" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M3 10v4h4l5 4V6L7 10H3z" />
+                          </svg>
+                          AUDIO
+                        </div>
+                      ) : null}
                     </button>
                   );
                 })}

@@ -530,10 +530,15 @@ export async function registerAssetRoutes(app: FastifyInstance) {
     const { generateSpeech } = await import('../services/adapters.js');
 
     try {
+      const provider = body.provider ?? config.defaults.tts_provider;
+      const template =
+        provider === 'piper'
+          ? body.template ?? config.defaults.piper_tts_voice
+          : body.template ?? config.defaults.tts_voice;
       const response = await generateSpeech({
         text: body.text,
-        template: body.template ?? config.defaults.tts_voice,
-        provider: body.provider,
+        template,
+        provider,
         speed: body.speed,
         volume: body.volume,
         prompt_text: body.prompt_text,

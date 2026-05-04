@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { Shot } from './ShotsPage';
-import { fetchJobStatus, generateSoundEffect, generateVoiceOver, type JobStatus } from '../../lib/api';
+import { API_BASE_URL, fetchJobStatus, generateSoundEffect, generateVoiceOver, type JobStatus } from '../../lib/api';
 import { showToast } from '../../stores';
 
 interface ShotEditorProps {
   projectId: string;
   shot: Shot;
+  shots: Shot[];
   onSave?: (updates: Partial<Shot>) => void;
   isMutating?: boolean;
 }
@@ -18,6 +19,18 @@ type StoredVoiceOver = Record<
   string,
   {
     text?: string;
+    audioUrl?: string;
+    jobId?: string;
+    status?: string;
+    provider?: 'piper' | 'cosyvoice';
+    template?: string;
+    updatedAt: number;
+  }
+>;
+
+type StoredNarrationAudio = Record<
+  string,
+  {
     audioUrl?: string;
     jobId?: string;
     status?: string;
@@ -44,10 +57,26 @@ type StoredDialogue = Record<
   }
 >;
 
-export function ShotEditor({ projectId, shot, onSave, isMutating }: ShotEditorProps) {
+function resolveMaybeRelativeUrl(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const url = value.trim();
+  if (!url) return null;
+  if (url.startsWith('http://') || url.startsWith('https://')) return url;
+  if (url.startsWith('/')) {
+    try {
+      return new URL(url, API_BASE_URL).toString();
+    } catch {
+      return url;
+    }
+  }
+  return url;
+}
+
+export function ShotEditor({ projectId, shot, shots, onSave, isMutating }: ShotEditorProps) {
   const sfxWorkflow = (import.meta.env.VITE_SFX_WORKFLOW as string | undefined) || 'sfx';
   const [prompt, setPrompt] = useState(shot.prompt);
   const [action, setAction] = useState(shot.action || '');
+  const [narrationText, setNarrationText] = useState(shot.narration_text || '');
   const [narration, setNarration] = useState(shot.narration || '');
   const [internalMonologue, setInternalMonologue] = useState(shot.internal_monologue || '');
   const [dialogue, setDialogue] = useState(shot.dialogue || '');
@@ -64,10 +93,20 @@ export function ShotEditor({ projectId, shot, onSave, isMutating }: ShotEditorPr
   const [duration, setDuration] = useState(shot.duration || 3);
   const [isDirty, setIsDirty] = useState(false);
 
-  const [voiceOverTextByShotId, setVoiceOverTextByShotId] = useState<Record<string, string>>({});
+  const [narrationAudioByShotId, setNarrationAudioByShotId] = useState<Record<string, string>>({});
+  const [narrationJobByShotId, setNarrationJobByShotId] = useState<Record<string, string>>({});
+  const [narrationStatusByShotId, setNarrationStatusByShotId] = useState<Record<string, string>>({});
+  const [narrationHydratedForProjectId, setNarrationHydratedForProjectId] = useState<string | null>(null);
+  const [isGeneratingNarration, setIsGeneratingNarration] = useState(false);
+  const [isGeneratingNarrationAll, setIsGeneratingNarrationAll] = useState(false);
+
   const [voiceOverAudioByShotId, setVoiceOverAudioByShotId] = useState<Record<string, string>>({});
   const [voiceOverJobByShotId, setVoiceOverJobByShotId] = useState<Record<string, string>>({});
   const [voiceOverStatusByShotId, setVoiceOverStatusByShotId] = useState<Record<string, string>>({});
+  const [voiceOverProviderByShotId, setVoiceOverProviderByShotId] = useState<
+    Record<string, 'piper' | 'cosyvoice'>
+  >({});
+  const [voiceOverTemplateByShotId, setVoiceOverTemplateByShotId] = useState<Record<string, string>>({});
   const [dialogueByShotId, setDialogueByShotId] = useState<Record<string, DialogueLine[]>>({});
   const [dialogueHydratedForProjectId, setDialogueHydratedForProjectId] = useState<string | null>(
     null
@@ -83,10 +122,15 @@ export function ShotEditor({ projectId, shot, onSave, isMutating }: ShotEditorPr
   const [sfxHydratedForProjectId, setSfxHydratedForProjectId] = useState<string | null>(null);
   const [isGeneratingSfx, setIsGeneratingSfx] = useState(false);
 
-  const voiceOverText = voiceOverTextByShotId[shot.id] ?? '';
+  const narrationAudioUrl = narrationAudioByShotId[shot.id] ?? '';
+  const narrationJobId = narrationJobByShotId[shot.id] ?? '';
+  const narrationStatus = narrationStatusByShotId[shot.id] ?? '';
+
   const voiceOverAudioUrl = voiceOverAudioByShotId[shot.id] ?? '';
   const voiceOverJobId = voiceOverJobByShotId[shot.id] ?? '';
   const voiceOverStatus = voiceOverStatusByShotId[shot.id] ?? '';
+  const voiceOverProvider = voiceOverProviderByShotId[shot.id] ?? 'piper';
+  const voiceOverTemplate = voiceOverTemplateByShotId[shot.id] ?? '';
   const dialogueLines = dialogueByShotId[shot.id] ?? [];
 
   const sfxPrompt = sfxPromptByShotId[shot.id] ?? '';
@@ -97,6 +141,7 @@ export function ShotEditor({ projectId, shot, onSave, isMutating }: ShotEditorPr
   useEffect(() => {
     setPrompt(shot.prompt);
     setAction(shot.action || '');
+    setNarrationText(shot.narration_text || '');
     setNarration(shot.narration || '');
     setInternalMonologue(shot.internal_monologue || '');
     setDialogue(shot.dialogue || '');
@@ -116,6 +161,7 @@ export function ShotEditor({ projectId, shot, onSave, isMutating }: ShotEditorPr
     shot.id,
     shot.prompt,
     shot.action,
+    shot.narration_text,
     shot.narration,
     shot.internal_monologue,
     shot.dialogue,
@@ -148,7 +194,7 @@ export function ShotEditor({ projectId, shot, onSave, isMutating }: ShotEditorPr
           id: makeLineId(),
           speaker: '',
           text: q,
-          provider: 'cosyvoice',
+          provider: 'piper',
           template: '',
         });
       }
@@ -164,7 +210,7 @@ export function ShotEditor({ projectId, shot, onSave, isMutating }: ShotEditorPr
           id: makeLineId(),
           speaker: (m[1] ?? '').trim(),
           text: (m[2] ?? '').trim(),
-          provider: 'cosyvoice',
+          provider: 'piper',
           template: '',
         });
       }
@@ -173,6 +219,45 @@ export function ShotEditor({ projectId, shot, onSave, isMutating }: ShotEditorPr
 
     return [];
   };
+
+  useEffect(() => {
+    if (!projectId) return;
+    if (narrationHydratedForProjectId === projectId) return;
+
+    const storageKey = `aiwf:shotNarrationAudio:${projectId}`;
+    try {
+      const raw = window.localStorage.getItem(storageKey);
+      if (!raw) {
+        setNarrationHydratedForProjectId(projectId);
+        return;
+      }
+
+      const parsed = JSON.parse(raw) as { items?: StoredNarrationAudio } | StoredNarrationAudio;
+      const items: StoredNarrationAudio =
+        parsed && typeof parsed === 'object' && 'items' in (parsed as Record<string, unknown>)
+          ? (((parsed as Record<string, unknown>).items ?? {}) as StoredNarrationAudio)
+          : (parsed as StoredNarrationAudio);
+
+      const nextAudio: Record<string, string> = {};
+      const nextJobs: Record<string, string> = {};
+      const nextStatus: Record<string, string> = {};
+
+      for (const [shotId, item] of Object.entries(items ?? {})) {
+        if (!item || typeof item !== 'object') continue;
+        if (typeof item.audioUrl === 'string') nextAudio[shotId] = item.audioUrl;
+        if (typeof item.jobId === 'string') nextJobs[shotId] = item.jobId;
+        if (typeof item.status === 'string') nextStatus[shotId] = item.status;
+      }
+
+      setNarrationAudioByShotId(nextAudio);
+      setNarrationJobByShotId(nextJobs);
+      setNarrationStatusByShotId(nextStatus);
+    } catch {
+      // ignore invalid localStorage state
+    } finally {
+      setNarrationHydratedForProjectId(projectId);
+    }
+  }, [narrationHydratedForProjectId, projectId]);
 
   useEffect(() => {
     if (!projectId) return;
@@ -192,23 +277,26 @@ export function ShotEditor({ projectId, shot, onSave, isMutating }: ShotEditorPr
           ? (((parsed as Record<string, unknown>).items ?? {}) as StoredVoiceOver)
           : (parsed as StoredVoiceOver);
 
-      const nextText: Record<string, string> = {};
       const nextAudio: Record<string, string> = {};
       const nextJobs: Record<string, string> = {};
       const nextStatus: Record<string, string> = {};
+      const nextProviders: Record<string, 'piper' | 'cosyvoice'> = {};
+      const nextTemplates: Record<string, string> = {};
 
       for (const [shotId, item] of Object.entries(items ?? {})) {
         if (!item || typeof item !== 'object') continue;
-        if (typeof item.text === 'string') nextText[shotId] = item.text;
         if (typeof item.audioUrl === 'string') nextAudio[shotId] = item.audioUrl;
         if (typeof item.jobId === 'string') nextJobs[shotId] = item.jobId;
         if (typeof item.status === 'string') nextStatus[shotId] = item.status;
+        if (item.provider === 'piper' || item.provider === 'cosyvoice') nextProviders[shotId] = item.provider;
+        if (typeof item.template === 'string') nextTemplates[shotId] = item.template;
       }
 
-      setVoiceOverTextByShotId(nextText);
       setVoiceOverAudioByShotId(nextAudio);
       setVoiceOverJobByShotId(nextJobs);
       setVoiceOverStatusByShotId(nextStatus);
+      setVoiceOverProviderByShotId(nextProviders);
+      setVoiceOverTemplateByShotId(nextTemplates);
     } catch {
       // ignore invalid localStorage state
     } finally {
@@ -330,19 +418,21 @@ export function ShotEditor({ projectId, shot, onSave, isMutating }: ShotEditorPr
     const now = Date.now();
     const merged: StoredVoiceOver = {};
     const shotIds = new Set<string>([
-      ...Object.keys(voiceOverTextByShotId),
       ...Object.keys(voiceOverAudioByShotId),
       ...Object.keys(voiceOverJobByShotId),
       ...Object.keys(voiceOverStatusByShotId),
+      ...Object.keys(voiceOverProviderByShotId),
+      ...Object.keys(voiceOverTemplateByShotId),
     ]);
 
     for (const shotId of shotIds) {
-      const text = voiceOverTextByShotId[shotId];
       const audioUrl = voiceOverAudioByShotId[shotId];
       const jobId = voiceOverJobByShotId[shotId];
       const status = voiceOverStatusByShotId[shotId];
-      if (!text && !audioUrl && !jobId && !status) continue;
-      merged[shotId] = { text, audioUrl, jobId, status, updatedAt: now };
+      const provider = voiceOverProviderByShotId[shotId];
+      const template = voiceOverTemplateByShotId[shotId];
+      if (!audioUrl && !jobId && !status && !provider && !template) continue;
+      merged[shotId] = { audioUrl, jobId, status, provider, template, updatedAt: now };
     }
 
     const entries = Object.entries(merged).sort((a, b) => (b[1].updatedAt ?? 0) - (a[1].updatedAt ?? 0));
@@ -355,10 +445,47 @@ export function ShotEditor({ projectId, shot, onSave, isMutating }: ShotEditorPr
   }, [
     hydratedForProjectId,
     projectId,
-    voiceOverTextByShotId,
     voiceOverAudioByShotId,
     voiceOverJobByShotId,
+    voiceOverProviderByShotId,
     voiceOverStatusByShotId,
+    voiceOverTemplateByShotId,
+  ]);
+
+  useEffect(() => {
+    if (!projectId) return;
+    if (narrationHydratedForProjectId !== projectId) return;
+    const storageKey = `aiwf:shotNarrationAudio:${projectId}`;
+
+    const now = Date.now();
+    const merged: StoredNarrationAudio = {};
+    const shotIds = new Set<string>([
+      ...Object.keys(narrationAudioByShotId),
+      ...Object.keys(narrationJobByShotId),
+      ...Object.keys(narrationStatusByShotId),
+    ]);
+
+    for (const shotId of shotIds) {
+      const audioUrl = narrationAudioByShotId[shotId];
+      const jobId = narrationJobByShotId[shotId];
+      const status = narrationStatusByShotId[shotId];
+      if (!audioUrl && !jobId && !status) continue;
+      merged[shotId] = { audioUrl, jobId, status, updatedAt: now };
+    }
+
+    const entries = Object.entries(merged).sort((a, b) => (b[1].updatedAt ?? 0) - (a[1].updatedAt ?? 0));
+    const capped = Object.fromEntries(entries.slice(0, 200));
+    try {
+      window.localStorage.setItem(storageKey, JSON.stringify({ items: capped }));
+    } catch {
+      // ignore quota errors
+    }
+  }, [
+    narrationHydratedForProjectId,
+    projectId,
+    narrationAudioByShotId,
+    narrationJobByShotId,
+    narrationStatusByShotId,
   ]);
 
   const extractAudioUrlFromJob = (job: JobStatus): string | null => {
@@ -366,16 +493,84 @@ export function ShotEditor({ projectId, shot, onSave, isMutating }: ShotEditorPr
     if (!artifacts || typeof artifacts !== 'object') return null;
     const record = artifacts as Record<string, unknown>;
 
-    const url =
-      typeof record.audio_url === 'string'
-        ? record.audio_url
-        : typeof record.audioUrl === 'string'
-          ? (record.audioUrl as string)
-          : typeof record.url === 'string'
-            ? (record.url as string)
-            : null;
-    return url || null;
+    return (
+      resolveMaybeRelativeUrl(record.audio_url) ??
+      resolveMaybeRelativeUrl(record.audioUrl) ??
+      resolveMaybeRelativeUrl(record.url) ??
+      resolveMaybeRelativeUrl(record.audio_path) ??
+      resolveMaybeRelativeUrl(record.audioPath) ??
+      null
+    );
   };
+
+  useEffect(() => {
+    if (!projectId) return;
+
+    const pending = Object.entries(narrationJobByShotId).filter(([shotId, jobId]) => {
+      if (!jobId) return false;
+      return !narrationAudioByShotId[shotId];
+    });
+    if (pending.length === 0) return;
+
+    let cancelled = false;
+    let interval: number | undefined;
+
+    const pollOnce = async () => {
+      const slice = pending.slice(0, 5);
+      for (const [shotId, jobId] of slice) {
+        if (cancelled) return;
+        try {
+          const job = await fetchJobStatus(jobId);
+          if (cancelled) return;
+          setNarrationStatusByShotId(prev => ({ ...prev, [shotId]: job.status }));
+
+          if (job.status === 'completed') {
+            const url = extractAudioUrlFromJob(job);
+            if (url) {
+              setNarrationAudioByShotId(prev => ({ ...prev, [shotId]: url }));
+              if (shotId === shot.id) {
+                showToast({ type: 'success', title: 'Narration ready', message: 'Audio generated.' });
+              }
+            } else {
+              setNarrationJobByShotId(prev => ({ ...prev, [shotId]: '' }));
+              if (shotId === shot.id) {
+                showToast({
+                  type: 'warning',
+                  title: 'Narration completed',
+                  message: 'Job completed but no audio URL was returned.',
+                });
+              }
+            }
+          }
+
+          if (job.status === 'failed' || job.status === 'error') {
+            setNarrationJobByShotId(prev => ({ ...prev, [shotId]: '' }));
+            if (shotId === shot.id) {
+              showToast({
+                type: 'error',
+                title: 'Narration failed',
+                message:
+                  typeof job.artifacts === 'object' && job.artifacts
+                    ? JSON.stringify(job.artifacts).slice(0, 500)
+                    : 'Narration job failed',
+              });
+            }
+          }
+        } catch {
+          // ignore individual poll errors
+        }
+      }
+    };
+
+    pollOnce();
+    interval = window.setInterval(pollOnce, 3000);
+
+    return () => {
+      cancelled = true;
+      if (interval) window.clearInterval(interval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, shot.id, narrationAudioByShotId, narrationJobByShotId]);
 
   useEffect(() => {
     if (!voiceOverJobId) return;
@@ -605,8 +800,9 @@ export function ShotEditor({ projectId, shot, onSave, isMutating }: ShotEditorPr
       });
       setSfxJobByShotId(prev => ({ ...prev, [shot.id]: result.job_id }));
       setSfxStatusByShotId(prev => ({ ...prev, [shot.id]: result.status }));
-      if (result.audio_url) {
-        setSfxAudioByShotId(prev => ({ ...prev, [shot.id]: result.audio_url! }));
+      const audioUrl = resolveMaybeRelativeUrl(result.audio_url) ?? resolveMaybeRelativeUrl(result.audio_path);
+      if (audioUrl) {
+        setSfxAudioByShotId(prev => ({ ...prev, [shot.id]: audioUrl }));
       } else {
         showToast({
           type: 'warning',
@@ -626,25 +822,121 @@ export function ShotEditor({ projectId, shot, onSave, isMutating }: ShotEditorPr
   };
 
   const voiceOverPlaceholder = useMemo(() => {
+    if (narrationText && narrationText.trim()) return `Narration: ${narrationText.trim()}`;
     if (shot.subtitle && shot.subtitle.trim()) return `Narration: ${shot.subtitle.trim()}`;
     if (shot.prompt && shot.prompt.trim()) return `Narration: ${shot.prompt.trim()}`;
     return 'Write the voice-over script here...';
-  }, [shot.prompt, shot.subtitle]);
+  }, [narrationText, shot.prompt, shot.subtitle]);
+
+  const handleGenerateNarration = async () => {
+    if (!projectId) return;
+    const text = (narrationText || '').trim();
+    if (!text) {
+      showToast({ type: 'error', title: 'Missing narration', message: 'Enter narration text.' });
+      return;
+    }
+    setIsGeneratingNarration(true);
+    setNarrationAudioByShotId(prev => ({ ...prev, [shot.id]: '' }));
+    try {
+      const result = await generateVoiceOver({ projectId, text });
+      setNarrationJobByShotId(prev => ({ ...prev, [shot.id]: result.job_id }));
+      setNarrationStatusByShotId(prev => ({ ...prev, [shot.id]: result.status }));
+      const audioUrl = resolveMaybeRelativeUrl(result.audio_url) ?? resolveMaybeRelativeUrl(result.audio_path);
+      if (audioUrl) {
+        setNarrationAudioByShotId(prev => ({ ...prev, [shot.id]: audioUrl }));
+      } else {
+        showToast({
+          type: 'warning',
+          title: 'Narration queued',
+          message: `Job ${result.job_id} started (no audio URL yet).`,
+        });
+      }
+    } catch (err) {
+      showToast({
+        type: 'error',
+        title: 'Narration failed',
+        message: err instanceof Error ? err.message : 'Unknown error',
+      });
+    } finally {
+      setIsGeneratingNarration(false);
+    }
+  };
+
+  const handleGenerateNarrationForAllShots = async () => {
+    if (!projectId) return;
+    if (!Array.isArray(shots) || shots.length === 0) return;
+
+    const candidates = shots
+      .map(s => ({
+        shotId: s.id,
+        text: (s.id === shot.id ? narrationText : s.narration_text || '').trim(),
+      }))
+      .filter(c => c.text.length > 0);
+
+    if (candidates.length === 0) {
+      showToast({
+        type: 'warning',
+        title: 'No narration to generate',
+        message: 'No shots have Narration (Story) text.',
+      });
+      return;
+    }
+
+    const overwriteCount = candidates.filter(c => Boolean(narrationAudioByShotId[c.shotId])).length;
+    const confirmMessage = overwriteCount
+      ? `Generate narration audio for ${candidates.length} shot(s)? This will overwrite existing narration audio for ${overwriteCount} shot(s).`
+      : `Generate narration audio for ${candidates.length} shot(s)?`;
+    if (!window.confirm(confirmMessage)) return;
+
+    setIsGeneratingNarrationAll(true);
+    let okCount = 0;
+    let failCount = 0;
+
+    for (const c of candidates) {
+      try {
+        setNarrationAudioByShotId(prev => ({ ...prev, [c.shotId]: '' }));
+        const result = await generateVoiceOver({ projectId, text: c.text });
+        okCount += 1;
+        setNarrationJobByShotId(prev => ({ ...prev, [c.shotId]: result.job_id }));
+        setNarrationStatusByShotId(prev => ({ ...prev, [c.shotId]: result.status }));
+        const audioUrl = resolveMaybeRelativeUrl(result.audio_url) ?? resolveMaybeRelativeUrl(result.audio_path);
+        if (audioUrl) {
+          setNarrationAudioByShotId(prev => ({ ...prev, [c.shotId]: audioUrl }));
+        }
+      } catch {
+        failCount += 1;
+      }
+    }
+
+    showToast({
+      type: failCount ? 'warning' : 'success',
+      title: failCount ? 'Narration generation finished' : 'Narration generation queued',
+      message: failCount ? `Queued ${okCount} shot(s); failed ${failCount}.` : `Queued ${okCount} shot(s).`,
+    });
+
+    setIsGeneratingNarrationAll(false);
+  };
 
   const handleGenerateVoiceOver = async () => {
     if (!projectId) return;
-    const text = (voiceOverText || '').trim();
+    const text = (narration || '').trim();
     if (!text) {
       showToast({ type: 'error', title: 'Missing voice-over', message: 'Enter voice-over text.' });
       return;
     }
     setIsGeneratingVoiceOver(true);
     try {
-      const result = await generateVoiceOver({ projectId, text });
+      const result = await generateVoiceOver({
+        projectId,
+        text,
+        provider: voiceOverProvider,
+        template: voiceOverTemplate.trim() || undefined,
+      });
       setVoiceOverJobByShotId(prev => ({ ...prev, [shot.id]: result.job_id }));
       setVoiceOverStatusByShotId(prev => ({ ...prev, [shot.id]: result.status }));
-      if (result.audio_url) {
-        setVoiceOverAudioByShotId(prev => ({ ...prev, [shot.id]: result.audio_url! }));
+      const audioUrl = resolveMaybeRelativeUrl(result.audio_url) ?? resolveMaybeRelativeUrl(result.audio_path);
+      if (audioUrl) {
+        setVoiceOverAudioByShotId(prev => ({ ...prev, [shot.id]: audioUrl }));
       } else {
         showToast({
           type: 'warning',
@@ -676,7 +968,7 @@ export function ShotEditor({ projectId, shot, onSave, isMutating }: ShotEditorPr
       const current = prev[shot.id] ?? [];
       const next: DialogueLine[] = [
         ...current,
-        { id: makeLineId(), speaker: '', text: '', provider: 'cosyvoice', template: '' },
+        { id: makeLineId(), speaker: '', text: '', provider: 'piper', template: '' },
       ];
       return { ...prev, [shot.id]: next };
     });
@@ -720,8 +1012,9 @@ export function ShotEditor({ projectId, shot, onSave, isMutating }: ShotEditorPr
         provider: line.provider,
         template: line.template || undefined,
       });
-      updateDialogueLine(lineId, { jobId: result.job_id, status: result.status, audioUrl: result.audio_url });
-      if (!result.audio_url) {
+      const audioUrl = resolveMaybeRelativeUrl(result.audio_url) ?? resolveMaybeRelativeUrl(result.audio_path);
+      updateDialogueLine(lineId, { jobId: result.job_id, status: result.status, audioUrl: audioUrl ?? undefined });
+      if (!audioUrl) {
         showToast({
           type: 'warning',
           title: 'Voice queued',
@@ -749,6 +1042,7 @@ export function ShotEditor({ projectId, shot, onSave, isMutating }: ShotEditorPr
       motion,
       duration,
       action,
+      narration_text: narrationText,
       narration,
       internal_monologue: internalMonologue,
       dialogue,
@@ -982,39 +1276,153 @@ export function ShotEditor({ projectId, shot, onSave, isMutating }: ShotEditorPr
 
       <div className="border-t border-comfy-border pt-4">
         <div className="flex items-center justify-between mb-3">
+          <h4 className="text-sm font-semibold text-comfy-text">Narration (Story)</h4>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className="comfy-btn text-xs disabled:opacity-50"
+              onClick={handleGenerateNarration}
+              disabled={!projectId || isGeneratingNarration || !narrationText.trim()}
+              title="Generate narration audio from Narration (Story)"
+            >
+              {isGeneratingNarration ? 'Generating…' : 'Generate Narration'}
+            </button>
+            <button
+              type="button"
+              className="comfy-btn-secondary text-xs disabled:opacity-50"
+              onClick={handleGenerateNarrationForAllShots}
+              disabled={!projectId || isGeneratingNarrationAll || shots.length === 0}
+              title="Generate narration audio for all shots that have Narration (Story)"
+            >
+              {isGeneratingNarrationAll ? 'Generating…' : 'Generate for all shots'}
+            </button>
+            <button
+              type="button"
+              className="comfy-btn-secondary text-xs disabled:opacity-50"
+              onClick={() => {
+                if (!narrationText.trim()) return;
+                setNarration(narrationText);
+                setIsDirty(true);
+              }}
+              disabled={!narrationText.trim()}
+              title="Copy narration text into the Voice-over field"
+            >
+              Copy → Voice-over
+            </button>
+          </div>
+        </div>
+
+        <textarea
+          value={narrationText}
+          onChange={e => {
+            setNarrationText(e.target.value);
+            setIsDirty(true);
+          }}
+          rows={4}
+          className="comfy-input w-full text-sm resize-none"
+          placeholder="Story-faithful narration chunk (optional)..."
+        />
+
+        <div className="mt-3 flex items-center gap-2">
+          {narrationJobId ? (
+            <span className="text-xs text-comfy-muted">
+              Job {narrationJobId.slice(0, 8)}… {narrationStatus || ''}
+            </span>
+          ) : null}
+        </div>
+
+        {narrationAudioUrl ? (
+          <div className="mt-3 space-y-2">
+            <audio controls src={narrationAudioUrl} className="w-full" />
+            <a
+              href={narrationAudioUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="text-xs text-[var(--accent)] hover:underline"
+            >
+              Download audio
+            </a>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="border-t border-comfy-border pt-4">
+        <div className="flex items-center justify-between mb-3">
           <h4 className="text-sm font-semibold text-comfy-text">Voice-over</h4>
           <button
             type="button"
             className="comfy-btn-secondary text-xs disabled:opacity-50"
-            onClick={() =>
-              setVoiceOverTextByShotId(prev => ({
-                ...prev,
-                [shot.id]: prev[shot.id] ?? shot.subtitle ?? '',
-              }))
-            }
-            disabled={Boolean(voiceOverTextByShotId[shot.id])}
-            title="Prefill from shot subtitle"
+            onClick={() => {
+              if (narration.trim()) return;
+              const next =
+                (narrationText || '').trim() ||
+                (shot.subtitle || '').trim() ||
+                (shot.prompt || '').trim() ||
+                '';
+              setNarration(next);
+              setIsDirty(true);
+            }}
+            disabled={Boolean(narration.trim())}
+            title="Prefill from Narration (Story) or shot text"
           >
             Prefill
           </button>
         </div>
 
         <textarea
-          value={voiceOverText}
-          onChange={e =>
-            setVoiceOverTextByShotId(prev => ({ ...prev, [shot.id]: e.target.value }))
-          }
+          value={narration}
+          onChange={e => {
+            setNarration(e.target.value);
+            setIsDirty(true);
+          }}
           rows={3}
           className="comfy-input w-full text-sm resize-none"
           placeholder={voiceOverPlaceholder}
         />
+
+        <div className="mt-3 grid grid-cols-[160px_minmax(0,1fr)] gap-3">
+          <div>
+            <label className="block text-xs text-comfy-muted mb-1">Voice Provider</label>
+            <select
+              value={voiceOverProvider}
+              onChange={e =>
+                setVoiceOverProviderByShotId(prev => ({
+                  ...prev,
+                  [shot.id]: e.target.value as 'piper' | 'cosyvoice',
+                }))
+              }
+            className="comfy-input w-full text-sm"
+            title="Voice-over provider"
+          >
+            <option value="piper">Piper</option>
+            <option value="cosyvoice">CosyVoice</option>
+          </select>
+          </div>
+          <div>
+            <label className="block text-xs text-comfy-muted mb-1">Voice Template</label>
+            <input
+              value={voiceOverTemplate}
+              onChange={e =>
+                setVoiceOverTemplateByShotId(prev => ({
+                  ...prev,
+                  [shot.id]: e.target.value,
+                }))
+              }
+              className="comfy-input w-full text-sm"
+              placeholder={
+                voiceOverProvider === 'piper' ? 'e.g. en_US-hfc_female-medium' : 'Optional template/voice'
+              }
+              title="Voice template override"
+            />
+          </div>
+        </div>
 
         <div className="mt-3 flex items-center gap-2">
           <button
             type="button"
             className="comfy-btn disabled:opacity-50"
             onClick={handleGenerateVoiceOver}
-            disabled={!projectId || isGeneratingVoiceOver}
+            disabled={!projectId || isGeneratingVoiceOver || !narration.trim()}
           >
             {isGeneratingVoiceOver ? 'Generating…' : 'Generate Voice-over'}
           </button>
@@ -1140,8 +1548,8 @@ export function ShotEditor({ projectId, shot, onSave, isMutating }: ShotEditorPr
                     className="comfy-input text-sm w-40"
                     title="Voice type"
                   >
-                    <option value="cosyvoice">CosyVoice</option>
                     <option value="piper">Piper</option>
+                    <option value="cosyvoice">CosyVoice</option>
                   </select>
                   <input
                     value={line.template}

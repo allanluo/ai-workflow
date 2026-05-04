@@ -114,6 +114,19 @@ export function ScenesPage({ projectId }: ScenesPageProps) {
     select: assets => assets.filter(a => a.asset_type === 'scene'),
   });
 
+  const generatedImagesQuery = useQuery({
+    queryKey: ['project-generated-images', projectId, selectedWorkflowId],
+    queryFn: () => fetchProjectAssets(projectId),
+    enabled: Boolean(projectId),
+    select: assets =>
+      assets.filter(a => {
+        if (a.asset_type !== 'generated_image') return false;
+        if (!selectedWorkflowId) return true;
+        const meta = a.metadata as Record<string, unknown> | null;
+        return meta?.workflow_id === selectedWorkflowId;
+      }),
+  });
+
   const visibleScenes = useMemo(() => {
     const scenes = [...(scenesQuery.data ?? [])];
 
@@ -194,12 +207,18 @@ export function ScenesPage({ projectId }: ScenesPageProps) {
 
   const selectedItem = sceneItems.find(s => s.assetId === selectedAssetId) ?? null;
   const selectedAsset = visibleScenes.find(a => a.id === selectedAssetId) ?? null;
+  const batchScenesRaw = useMemo(
+    () => (selectedAsset ? extractSceneList(selectedAsset) : null),
+    [selectedAssetId, selectedAsset?.current_asset_version_id]
+  );
   const batchScenesFromAsset = useMemo(
     () => (selectedAsset ? toBatchSceneItems(selectedAsset) : null),
     [selectedAssetId, selectedAsset?.current_asset_version_id]
   );
   const effectiveBatchScenes = batchScenesDraft ?? batchScenesFromAsset;
   const isBatchAsset = Boolean(effectiveBatchScenes && effectiveBatchScenes.length > 0);
+  const selectedBatchScene = isBatchAsset ? (batchScenesRaw?.[batchSceneIndex] ?? null) : null;
+  const generatedImageAssets = generatedImagesQuery.data ?? [];
 
   useEffect(() => {
     if (!selectedAsset) {
@@ -281,7 +300,12 @@ export function ScenesPage({ projectId }: ScenesPageProps) {
             )}
           </div>
           <div className="flex-1 overflow-auto p-4">
-            <ScenePreview asset={selectedAsset} />
+            <ScenePreview
+              asset={selectedAsset}
+              scene={selectedBatchScene}
+              generatedImageAssets={generatedImageAssets}
+              isLoadingGeneratedImages={generatedImagesQuery.isLoading}
+            />
           </div>
         </div>
       </div>

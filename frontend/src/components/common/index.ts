@@ -7,3 +7,4 @@ export { Modal, ConfirmDialog, Dialog } from './Modal';
 export { Dropdown, ContextMenu, SimpleMenu } from './Dropdown';
 export { ProjectPickerModal } from './ProjectPickerModal';
 export { Label } from './Label';
+export { AudioSegmentsPlayer } from './AudioSegmentsPlayer';

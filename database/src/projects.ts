@@ -133,10 +133,7 @@ export function updateProject(projectId: string, input: UpdateProjectInput) {
 
 export function archiveProject(projectId: string) {
   const existing = db.select().from(projects).where(eq(projects.id, projectId)).get();
-
-  if (!existing) {
-    return null;
-  }
+  if (!existing) return null;
 
   db.update(projects)
     .set({
@@ -148,8 +145,20 @@ export function archiveProject(projectId: string) {
     .run();
 
   insertProjectEvent(projectId, "project_archived", {});
-
   return getProjectById(projectId);
+}
+
+export function deleteProject(projectId: string) {
+  const existing = db.select().from(projects).where(eq(projects.id, projectId)).get();
+  if (!existing) return false;
+
+  // Clean up events first
+  db.delete(projectEvents).where(eq(projectEvents.projectId, projectId)).run();
+  
+  // Delete project
+  db.delete(projects).where(eq(projects.id, projectId)).run();
+  
+  return true;
 }
 
 export function listProjectEvents(projectId: string) {

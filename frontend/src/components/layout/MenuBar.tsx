@@ -50,12 +50,31 @@ export function MenuBar() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [openProjectPicker]);
 
+  useEffect(() => {
+    const handleGlobalShortcuts = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
+        e.preventDefault();
+        useAppStore.getState().openCreateProjectModal();
+      }
+    };
+    window.addEventListener('keydown', handleGlobalShortcuts);
+    return () => window.removeEventListener('keydown', handleGlobalShortcuts);
+  }, []);
+
   const menuCategories: MenuCategory[] = [
     {
       id: 'file',
       label: 'File',
       items: [
-        { id: 'new-project', label: 'New Project', shortcut: 'Ctrl+N', onClick: () => {} },
+        { 
+          id: 'new-project', 
+          label: 'New Project', 
+          shortcut: 'Ctrl+N', 
+          onClick: () => {
+            console.log('[MenuBar] Opening Create Project Modal');
+            useAppStore.getState().openCreateProjectModal();
+          } 
+        },
         {
           id: 'open-project',
           label: 'Open Project',
@@ -114,7 +133,6 @@ export function MenuBar() {
       items: [
         { id: 'settings', label: 'Project Settings', disabled: !currentProjectId },
         { id: 'workflows', label: 'Workflows', disabled: !currentProjectId },
-        { id: 'outputs', label: 'Outputs', disabled: !currentProjectId },
         { id: 'runs', label: 'Runs', disabled: !currentProjectId },
         { id: 'sep1', label: '', separator: true },
         { id: 'validate', label: 'Validate All', disabled: !currentProjectId },
